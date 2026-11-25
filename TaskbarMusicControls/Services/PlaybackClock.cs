@@ -13,12 +13,14 @@ internal sealed class PlaybackClock
     private static readonly TimeSpan UnknownDurationMaxAge = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan FutureTimestampTolerance = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SeekThreshold = TimeSpan.FromMilliseconds(1250);
+    private static readonly TimeSpan SeekSampleThreshold = TimeSpan.FromMilliseconds(500);
     private readonly object _gate = new();
     private TimeSpan _anchorPosition;
     private TimeSpan _duration;
     private TimeSpan _lastAcceptedRawPosition;
     private long _anchorTimestamp;
     private DateTimeOffset _lastAcceptedTimelineTime;
+    private DateTimeOffset _lastAcceptedReceivedUtc;
     private bool _isPlaying;
     private bool _hasAnchor;
 
@@ -36,6 +38,7 @@ internal sealed class PlaybackClock
             _duration = TimeSpan.Zero;
             _anchorTimestamp = Stopwatch.GetTimestamp();
             _lastAcceptedTimelineTime = DateTimeOffset.MinValue;
+            _lastAcceptedReceivedUtc = DateTimeOffset.MinValue;
             _lastAcceptedRawPosition = TimeSpan.Zero;
             _isPlaying = false;
             _hasAnchor = false;
@@ -101,19 +104,33 @@ internal sealed class PlaybackClock
                 else
                 {
                     var difference = candidate - current;
-                    if (difference.Duration() >= SeekThreshold)
+                    var sampleJump = rawPosition - _lastAcceptedRawPosition;
+                    var elapsedSinceSample = _lastAcceptedReceivedUtc == DateTimeOffset.MinValue
+                        ? TimeSpan.Zero
+                        : receivedUtc - _lastAcceptedReceivedUtc;
+                    if (elapsedSinceSample < TimeSpan.Zero)
+                        elapsedSinceSample = TimeSpan.Zero;
+                    var seekDelta = _lastAcceptedReceivedUtc == DateTimeOffset.MinValue
+                        ? TimeSpan.Zero
+                        : sampleJump - elapsedSinceSample;
+                    var isSeek = difference.Duration() >= SeekThreshold ||
+                        seekDelta.Duration() >= SeekSampleThreshold;
+
+                    if (isSeek)
                     {
                         SetAnchor(candidate, true, receivedTimestamp);
                         PlaybackSyncDiagnostics.Write(
-                            $"resync reason={reason} kind=discontinuity rawMs={rawPosition.TotalMilliseconds:F0} " +
+                            $"resync reason={reason} kind=seek rawMs={rawPosition.TotalMilliseconds:F0} " +
                             $"ageMs={age?.TotalMilliseconds:F0} predictedMs={current.TotalMilliseconds:F0} " +
-                            $"sampleMs={candidate.TotalMilliseconds:F0} deltaMs={difference.TotalMilliseconds:F0}");
+                            $"sampleMs={candidate.TotalMilliseconds:F0} deltaMs={difference.TotalMilliseconds:F0} " +
+                            $"seekDeltaMs={seekDelta.TotalMilliseconds:F0}");
                     }
                     else
                     {
-                        // Small drift is corrected without allowing noisy samples to move
-                        // the displayed lyric line back and forth.
-                        SetAnchor(current + TimeSpan.FromTicks(difference.Ticks / 2), true, receivedTimestamp);
+                        // Correct forward drift gradually, but never rewind the clock
+                        // because a snapshot arrived slightly behind our estimate.
+                        var correction = difference.Ticks > 0 ? difference.Ticks / 2 : 0;
+                        SetAnchor(current + TimeSpan.FromTicks(correction), true, receivedTimestamp);
                     }
                 }
             }
@@ -135,6 +152,7 @@ internal sealed class PlaybackClock
             {
                 _lastAcceptedTimelineTime = updatedUtc;
                 _lastAcceptedRawPosition = rawPosition;
+                _lastAcceptedReceivedUtc = receivedUtc;
             }
             _isPlaying = isPlaying;
         }

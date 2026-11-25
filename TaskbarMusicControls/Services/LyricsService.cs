@@ -34,15 +34,29 @@ internal sealed record LyricsDocument(
     {
         if (lines.Count == 0) return null;
         var index = -1;
+        var hasTimedLine = false;
         for (var i = 0; i < lines.Count; i++)
         {
-            if (!lines[i].Time.HasValue) { index = i; break; }
+            if (!lines[i].Time.HasValue) continue;
+            hasTimedLine = true;
             if (lines[i].Time!.Value <= position) index = i;
             else break;
         }
+
+        if (!hasTimedLine)
+        {
+            // Untimed-only tracks show their plain text; they have no sync timeline.
+            foreach (var line in lines)
+            {
+                if (!line.Time.HasValue && !string.IsNullOrWhiteSpace(line.Text))
+                    return new LyricFrame(line.Text, null, null);
+            }
+            return null;
+        }
+
         // Wait for the first timestamp instead of scrolling an upcoming lyric during the intro.
         if (index < 0) return null;
-        var line = lines[index];
+        var current = lines[index];
         TimeSpan? nextTime = null;
         for (var next = index + 1; next < lines.Count; next++)
         {
@@ -50,7 +64,7 @@ internal sealed record LyricsDocument(
             nextTime = lines[next].Time;
             break;
         }
-        return new LyricFrame(line.Text, line.Time, nextTime);
+        return new LyricFrame(current.Text, current.Time, nextTime);
     }
 }
 
@@ -424,7 +438,8 @@ internal static partial class LyricsParser
 
     public static LyricsDocument Parse(string text)
     {
-        var parsed = new List<(TimeSpan? Time, string Text)>();
+        var timed = new List<(TimeSpan Time, string Text)>();
+        var untimed = new List<string>();
         foreach (var raw in text.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None))
         {
             var line = raw.Trim();
@@ -432,7 +447,11 @@ internal static partial class LyricsParser
             var matches = TimestampRegex().Matches(line);
             var lyric = TimestampRegex().Replace(line, "").Trim();
             if (lyric.Length == 0) continue;
-            if (matches.Count == 0) parsed.Add((null, lyric));
+            if (matches.Count == 0)
+            {
+                untimed.Add(lyric);
+                continue;
+            }
             foreach (Match match in matches)
             {
                 var fraction = match.Groups[3].Value;
@@ -446,20 +465,24 @@ internal static partial class LyricsParser
                 var time = TimeSpan.FromMinutes(int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture)) +
                            TimeSpan.FromSeconds(int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture)) +
                            TimeSpan.FromMilliseconds(milliseconds);
-                parsed.Add((time, lyric));
+                timed.Add((time, lyric));
             }
         }
 
-        if (parsed.Count > 0 && parsed.All(entry => !entry.Time.HasValue))
+        if (timed.Count == 0)
+        {
+            if (untimed.Count == 0)
+                return new LyricsDocument(Array.Empty<LyricTrackLine>());
             return new LyricsDocument(new[]
             {
-                new LyricTrackLine(null, string.Join("　·　", parsed.Select(entry => entry.Text)))
+                new LyricTrackLine(null, string.Join("　·　", untimed))
             });
+        }
 
-        parsed = parsed.OrderBy(entry => entry.Time).ToList();
+        var ordered = timed.OrderBy(entry => entry.Time).ToList();
         var originals = new List<LyricTrackLine>();
         var translations = new List<LyricTrackLine>();
-        foreach (var group in parsed.GroupBy(entry => entry.Time))
+        foreach (var group in ordered.GroupBy(entry => entry.Time))
         {
             var entries = group.ToArray();
             originals.Add(new LyricTrackLine(group.Key, entries[0].Text));

@@ -45,6 +45,15 @@ internal sealed class TaskbarMusicWidgetService
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
     private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
     private TimeSpan _lyricsOffset;
+    private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();
+    private string _selectedTaskbarDeviceId = "";
+    private IntPtr _positionedTaskbar;
+    private Rect _positionedTaskbarBounds;
+    private Rect _positionedAvailableBounds;
+
+    private sealed record TaskbarLayoutEntry(
+        TaskbarInfo Taskbar,
+        TaskbarLayoutDetector.TaskbarLayout Layout);
 
     public TaskbarMusicWidgetService()
     {
@@ -62,16 +71,24 @@ internal sealed class TaskbarMusicWidgetService
     {
         _displayMode = WidgetDisplayModeStore.Load();
         _lyricsSourcePreference = LyricsSourceStore.Load();
+        _selectedTaskbarDeviceId = TaskbarSelectionStore.Load() ?? "";
         _layoutTimer.Start();
         await _mediaSessionService.InitializeAsync();
 
         var layouts = await Task.Run(DetectTaskbarLayouts);
-        foreach (var (taskbar, layout) in layouts)
+        _taskbarOptions = layouts.Select(entry => new TaskbarOption(
+            entry.Taskbar.DeviceId,
+            entry.Taskbar.DisplayName,
+            entry.Taskbar.IsPrimary)).ToArray();
+
+        foreach (var entry in OrderForSelection(layouts))
         {
-            if (!ShowOverlay(taskbar, layout))
+            if (!ShowOverlay(entry.Taskbar.Handle, entry.Layout))
                 continue;
 
-            WatchTaskbar(taskbar);
+            _selectedTaskbarDeviceId = entry.Taskbar.DeviceId;
+            _overlay?.SetTaskbarSelection(entry.Taskbar.DeviceId);
+            WatchTaskbar(entry.Taskbar.Handle);
             _nativeHandleTimer.Start();
             return;
         }
@@ -83,6 +100,7 @@ internal sealed class TaskbarMusicWidgetService
     {
         var overlay = new MusicOverlayWindow();
         overlay.SetDisplayMode(_displayMode);
+        overlay.SetTaskbarOptions(_taskbarOptions, _selectedTaskbarDeviceId);
         if (!overlay.PositionInAvailableArea(
                 taskbarHandle,
                 layout.TaskbarBounds,
@@ -103,6 +121,7 @@ internal sealed class TaskbarMusicWidgetService
         overlay.LyricsSourceChanged += OnLyricsSourceChanged;
         overlay.LyricsOffsetChanged += OnLyricsOffsetChanged;
         overlay.DisplayModeChanged += OnDisplayModeChanged;
+        overlay.TaskbarSelectionChanged += OnTaskbarSelectionChanged;
         overlay.Closed += OnOverlayClosed;
 
         var state = _mediaSessionService.CurrentState;
@@ -117,6 +136,10 @@ internal sealed class TaskbarMusicWidgetService
             layout.TaskbarBounds,
             layout.AvailableBounds);
 
+        _positionedTaskbar = taskbarHandle;
+        _positionedTaskbarBounds = layout.TaskbarBounds;
+        _positionedAvailableBounds = layout.AvailableBounds;
+
         Application.Current.MainWindow = overlay;
         return true;
     }
@@ -125,6 +148,17 @@ internal sealed class TaskbarMusicWidgetService
     {
         _displayMode = mode;
         WidgetDisplayModeStore.Save(mode);
+        ScheduleLayoutRefresh();
+    }
+
+    private void OnTaskbarSelectionChanged(object? sender, string deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId) ||
+            string.Equals(deviceId, _selectedTaskbarDeviceId, StringComparison.Ordinal))
+            return;
+
+        _selectedTaskbarDeviceId = deviceId;
+        TaskbarSelectionStore.Save(deviceId);
         ScheduleLayoutRefresh();
     }
 
@@ -320,17 +354,28 @@ internal sealed class TaskbarMusicWidgetService
             {
                 _layoutRefreshRequested = false;
                 var layouts = await Task.Run(DetectTaskbarLayouts);
+                _taskbarOptions = layouts.Select(entry => new TaskbarOption(
+                    entry.Taskbar.DeviceId,
+                    entry.Taskbar.DisplayName,
+                    entry.Taskbar.IsPrimary)).ToArray();
+                _overlay?.SetTaskbarOptions(_taskbarOptions, _selectedTaskbarDeviceId);
                 var foundLayout = false;
 
-                foreach (var (taskbar, layout) in layouts)
+                foreach (var entry in OrderForSelection(layouts))
                 {
                     foundLayout = true;
+                    var taskbar = entry.Taskbar.Handle;
+                    var layout = entry.Layout;
                     WatchTaskbar(taskbar);
 
                     if (_overlay is null)
                     {
                         if (ShowOverlay(taskbar, layout))
+                        {
+                            _selectedTaskbarDeviceId = entry.Taskbar.DeviceId;
+                            _overlay?.SetTaskbarSelection(entry.Taskbar.DeviceId);
                             _nativeHandleTimer.Start();
+                        }
                         break;
                     }
 
@@ -340,29 +385,51 @@ internal sealed class TaskbarMusicWidgetService
                         break;
                     }
 
-                    if (!_overlay.IsWithinAvailableArea(
-                            taskbar,
-                            layout.TaskbarBounds,
-                            layout.AvailableBounds))
+                    var samePlacement = _positionedTaskbar == taskbar &&
+                        RectsNearEqual(layout.TaskbarBounds, _positionedTaskbarBounds) &&
+                        RectsNearEqual(layout.AvailableBounds, _positionedAvailableBounds);
+
+                    if (!samePlacement)
                     {
+                        TaskbarLayoutDiagnostics.Write(
+                            $"reposition overlay: taskbar={taskbar} " +
+                            $"available={layout.AvailableBounds}");
                         if (!_overlay.PositionInAvailableArea(
                                 taskbar,
                                 layout.TaskbarBounds,
                                 layout.AvailableBounds))
                         {
+                            TaskbarLayoutDiagnostics.Write(
+                                "hide overlay: failed to position in available area");
                             _overlay.Hide();
                             break;
                         }
 
+                        _positionedTaskbar = taskbar;
+                        _positionedTaskbarBounds = layout.TaskbarBounds;
+                        _positionedAvailableBounds = layout.AvailableBounds;
+
                         if (!_overlay.IsVisible)
+                        {
+                            TaskbarLayoutDiagnostics.Write("show overlay after reposition");
                             _overlay.Show();
+                        }
+                    }
+                    else if (!_overlay.IsVisible)
+                    {
+                        _overlay.Show();
                     }
 
                     break;
                 }
 
-                if (!foundLayout && _overlay is { HasValidNativeHandle: true })
+                if (!foundLayout && _overlay is { HasValidNativeHandle: true } &&
+                    !HasTaskbarWindow())
+                {
+                    TaskbarLayoutDiagnostics.Write(
+                        "hide overlay: no taskbar window is available");
                     _overlay.Hide();
+                }
             }
             while (_layoutRefreshRequested);
         }
@@ -370,6 +437,28 @@ internal sealed class TaskbarMusicWidgetService
         {
             _layoutRefreshInProgress = false;
         }
+    }
+
+    private bool HasTaskbarWindow()
+    {
+        try
+        {
+            return _taskbarDetector.DetectTaskbars().Count > 0;
+        }
+        catch (Exception)
+        {
+            // If enumeration fails, keep the overlay where it is instead of hiding it.
+            return true;
+        }
+    }
+
+    private static bool RectsNearEqual(Rect left, Rect right)
+    {
+        const double tolerance = 10;
+        return Math.Abs(left.X - right.X) <= tolerance &&
+               Math.Abs(left.Y - right.Y) <= tolerance &&
+               Math.Abs(left.Width - right.Width) <= tolerance &&
+               Math.Abs(left.Height - right.Height) <= tolerance;
     }
 
     private void RecreateOverlay(
@@ -394,18 +483,44 @@ internal sealed class TaskbarMusicWidgetService
         ShowOverlay(taskbarHandle, layout);
     }
 
-    private (IntPtr Taskbar, TaskbarLayoutDetector.TaskbarLayout Layout)[]
-        DetectTaskbarLayouts()
+    private TaskbarLayoutEntry[] DetectTaskbarLayouts()
     {
-        var layouts = new List<(IntPtr, TaskbarLayoutDetector.TaskbarLayout)>();
-        foreach (var taskbar in _taskbarDetector.DetectTaskbars())
+        var taskbars = _taskbarDetector.DetectTaskbars()
+            .OrderBy(taskbar => taskbar.IsPrimary ? 0 : 1)
+            .ThenBy(taskbar => taskbar.Bounds.X)
+            .ThenBy(taskbar => taskbar.Bounds.Y)
+            .ToArray();
+
+        var layouts = new List<TaskbarLayoutEntry>();
+        foreach (var taskbar in taskbars)
         {
-            var layout = _layoutDetector.Detect(taskbar);
+            var layout = _layoutDetector.Detect(taskbar.Handle);
             if (layout is not null && !layout.AvailableBounds.IsEmpty)
-                layouts.Add((taskbar, layout));
+                layouts.Add(new TaskbarLayoutEntry(taskbar, layout));
         }
 
         return layouts.ToArray();
+    }
+
+    private TaskbarLayoutEntry[] OrderForSelection(IReadOnlyList<TaskbarLayoutEntry> layouts)
+    {
+        if (layouts.Count == 0)
+            return Array.Empty<TaskbarLayoutEntry>();
+
+        var selected = (_selectedTaskbarDeviceId.Length > 0
+                ? layouts.FirstOrDefault(entry =>
+                    string.Equals(entry.Taskbar.DeviceId, _selectedTaskbarDeviceId,
+                        StringComparison.Ordinal))
+                : null)
+            ?? layouts.FirstOrDefault(entry => entry.Taskbar.IsPrimary)
+            ?? layouts[0];
+        var ordered = new List<TaskbarLayoutEntry> { selected };
+        foreach (var entry in layouts)
+        {
+            if (!ReferenceEquals(entry, selected))
+                ordered.Add(entry);
+        }
+        return ordered.ToArray();
     }
 
     private void OnOverlayClosed(object? sender, EventArgs e)

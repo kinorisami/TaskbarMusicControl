@@ -16,7 +16,12 @@ internal sealed class TaskbarLayoutMonitor : IDisposable
         try
         {
             _root = AutomationElement.FromHandle(taskbarHandle);
-            _handler = (_, _) => LayoutChanged?.Invoke(this, EventArgs.Empty);
+            _handler = (sender, _) =>
+            {
+                if (sender is AutomationElement element && IsOwnProcessElement(element))
+                    return;
+                LayoutChanged?.Invoke(this, EventArgs.Empty);
+            };
             Automation.AddStructureChangedEventHandler(
                 _root,
                 TreeScope.Subtree,
@@ -54,5 +59,21 @@ internal sealed class TaskbarLayoutMonitor : IDisposable
 
         _root = null;
         _handler = null;
+    }
+
+    private static bool IsOwnProcessElement(AutomationElement element)
+    {
+        try
+        {
+            return element.Current.ProcessId == Environment.ProcessId;
+        }
+        catch (ElementNotAvailableException)
+        {
+            return true;
+        }
+        catch (System.Runtime.InteropServices.COMException)
+        {
+            return true;
+        }
     }
 }
