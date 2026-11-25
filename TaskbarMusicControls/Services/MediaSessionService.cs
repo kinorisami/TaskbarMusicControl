@@ -34,7 +34,9 @@ internal sealed class MediaSessionService
     public Task RefreshTimelineNowAsync()
     {
         var session = _session;
-        return session is null ? Task.CompletedTask : RefreshTimelineAsync(session);
+        return session is null || !CurrentState.IsPlaying
+            ? Task.CompletedTask
+            : RefreshTimelineAsync(session);
     }
 
     public Task TogglePlaybackAsync() => RunCommandAsync(session => session.TryTogglePlayPauseAsync());
@@ -166,12 +168,14 @@ internal sealed class MediaSessionService
                 return;
 
             var playbackInfo = changedSession.GetPlaybackInfo();
-            var timeline = changedSession.GetTimelineProperties();
             var controls = playbackInfo.Controls;
             var isPlaying = playbackInfo.PlaybackStatus ==
                 GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
             var canPlayPause = controls.IsPlayPauseToggleEnabled ||
                 (isPlaying ? controls.IsPauseEnabled : controls.IsPlayEnabled);
+            // Freeze the locally estimated position on pause and re-anchor it on resume.
+            // A few media sessions report a default zero timeline during playback-state changes.
+            var position = EstimatePosition(CurrentState);
 
             if (!ReferenceEquals(changedSession, _session))
                 return;
@@ -182,8 +186,7 @@ internal sealed class MediaSessionService
                 CanPlayPause = canPlayPause,
                 CanGoPrevious = controls.IsPreviousEnabled,
                 CanGoNext = controls.IsNextEnabled,
-                Duration = timeline.EndTime,
-                Position = timeline.Position,
+                Position = position,
                 PositionUpdatedAt = Stopwatch.GetTimestamp()
             });
         }
@@ -292,6 +295,17 @@ internal sealed class MediaSessionService
         CurrentState = state;
         StateChanged?.Invoke(state);
     }
+
+    private static TimeSpan EstimatePosition(MediaSessionState state)
+    {
+        var position = state.Position;
+        if (state.IsPlaying && state.PositionUpdatedAt != 0)
+            position += Stopwatch.GetElapsedTime(state.PositionUpdatedAt);
+        if (state.Duration > TimeSpan.Zero && position > state.Duration)
+            position = state.Duration;
+        return position < TimeSpan.Zero ? TimeSpan.Zero : position;
+    }
+
 }
 
 internal sealed record MediaSessionState(

@@ -39,6 +39,7 @@ internal sealed class TaskbarMusicWidgetService
     private CancellationTokenSource? _lyricsLookupCancellation;
     private string _lyricsTrackKey = "";
     private bool _lyricsMode;
+    private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
 
     public TaskbarMusicWidgetService()
     {
@@ -53,6 +54,7 @@ internal sealed class TaskbarMusicWidgetService
 
     public async Task StartAsync()
     {
+        _displayMode = WidgetDisplayModeStore.Load();
         _layoutTimer.Start();
         await _mediaSessionService.InitializeAsync();
 
@@ -73,6 +75,7 @@ internal sealed class TaskbarMusicWidgetService
         TaskbarLayoutDetector.TaskbarLayout layout)
     {
         var overlay = new MusicOverlayWindow();
+        overlay.SetDisplayMode(_displayMode);
         if (!overlay.PositionInAvailableArea(
                 taskbarHandle,
                 layout.TaskbarBounds,
@@ -90,6 +93,7 @@ internal sealed class TaskbarMusicWidgetService
         overlay.NextRequested += (_, _) =>
             _ = _mediaSessionService.SkipNextAsync();
         overlay.LyricsModeChanged += OnLyricsModeChanged;
+        overlay.DisplayModeChanged += OnDisplayModeChanged;
         overlay.Closed += OnOverlayClosed;
 
         var state = _mediaSessionService.CurrentState;
@@ -105,6 +109,13 @@ internal sealed class TaskbarMusicWidgetService
 
         Application.Current.MainWindow = overlay;
         return true;
+    }
+
+    private void OnDisplayModeChanged(object? sender, WidgetDisplayMode mode)
+    {
+        _displayMode = mode;
+        WidgetDisplayModeStore.Save(mode);
+        ScheduleLayoutRefresh();
     }
 
     private void OnMediaSessionStateChanged(MediaSessionState state)

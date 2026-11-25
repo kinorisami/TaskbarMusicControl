@@ -13,6 +13,13 @@ using TaskbarMusicControls.Services;
 
 namespace TaskbarMusicControls.Overlay;
 
+internal enum WidgetDisplayMode
+{
+    FullDetails,
+    CoverAndControls,
+    CoverOnly
+}
+
 public partial class MusicOverlayWindow : Window
 {
     private const int GwlExStyle = -20;
@@ -25,7 +32,8 @@ public partial class MusicOverlayWindow : Window
     private const uint SwpNoActivate = 0x0010;
     private static readonly nint HwndTop = 0;
     private const double DefaultWidth = 350;
-    private const double MinimumWidth = 108;
+    private const double MinimumWidth = 50;
+    private const double TransportLayoutWidth = 130;
 
     private nint _taskbarHandle;
     private nint _parentTaskbarHandle;
@@ -33,6 +41,10 @@ public partial class MusicOverlayWindow : Window
     private string _currentTitle = "No media playing";
     private string _currentArtist = "Start playback in a media app";
     private bool _lyricsMode;
+    private bool _hoverPlaybackOnlyMode;
+    private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
+    private double _lastAvailableWidth = DefaultWidth;
+    private double _responsiveLayoutWidth = -1;
     private LyricsDocument? _lyrics;
     private string _renderedOriginal = "";
     private string? _renderedTranslation;
@@ -45,6 +57,7 @@ public partial class MusicOverlayWindow : Window
     public event EventHandler? ToggleRequested;
     public event EventHandler? NextRequested;
     public event Action<object?, bool>? LyricsModeChanged;
+    internal event Action<object?, WidgetDisplayMode>? DisplayModeChanged;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -109,6 +122,7 @@ public partial class MusicOverlayWindow : Window
     {
         ToggleButton.Content = isPlaying ? "Ⅱ" : "▶";
         ToggleButton.IsEnabled = canPlayPause;
+        HoverPlaybackButton.IsEnabled = canPlayPause;
         PreviousButton.IsEnabled = canGoPrevious;
         NextButton.IsEnabled = canGoNext;
         ToggleButton.SetValue(
@@ -166,6 +180,16 @@ public partial class MusicOverlayWindow : Window
             : new SolidColorBrush(Color.FromRgb(48, 52, 58));
     }
 
+    internal void SetDisplayMode(WidgetDisplayMode mode)
+    {
+        _displayMode = mode;
+        var width = GetWidthForMode(_lastAvailableWidth);
+        if (Math.Abs(Width - width) > 0.5)
+            Width = width;
+        ApplyResponsiveLayout(width);
+        UpdateDisplayModeMenuChecks();
+    }
+
     public bool PositionInAvailableArea(
         nint taskbarHandle,
         Rect taskbarBounds,
@@ -176,16 +200,16 @@ public partial class MusicOverlayWindow : Window
             return false;
 
         var dpi = GetDpiScale(taskbarHandle);
-        var availableWidth = availableBounds.Width;
-        var width = Math.Min(DefaultWidth, availableWidth / dpi.DpiScaleX);
+        var availableWidth = availableBounds.Width / dpi.DpiScaleX;
+        _lastAvailableWidth = availableWidth;
+        var width = GetWidthForMode(availableWidth);
         if (width < MinimumWidth)
             return false;
 
         if (Math.Abs(Width - width) > 0.5)
-        {
             Width = width;
+        if (Math.Abs(_responsiveLayoutWidth - width) > 0.5)
             ApplyResponsiveLayout(width);
-        }
         _taskbarHandle = taskbarHandle;
 
         var physicalWidth = width * dpi.DpiScaleX;
@@ -239,42 +263,112 @@ public partial class MusicOverlayWindow : Window
         const double tolerance = 2;
 
         return left >= availableBounds.Left - tolerance &&
-               right <= availableBounds.Right + tolerance &&
+               Math.Abs(right - availableBounds.Right) <= tolerance &&
                top >= taskbarBounds.Top - tolerance &&
                bottom <= taskbarBounds.Bottom + tolerance;
     }
 
     private void ApplyResponsiveLayout(double width)
     {
-        if (width < 220)
+        _responsiveLayoutWidth = width;
+        var effectiveMode = _displayMode;
+        if (width < 300 && effectiveMode == WidgetDisplayMode.FullDetails)
+            effectiveMode = WidgetDisplayMode.CoverAndControls;
+        if (width < TransportLayoutWidth)
+            effectiveMode = WidgetDisplayMode.CoverOnly;
+
+        if (effectiveMode == WidgetDisplayMode.CoverOnly)
         {
-            Artwork.Visibility = Visibility.Collapsed;
-            ArtworkColumn.Width = new GridLength(0);
+            Artwork.Visibility = Visibility.Visible;
+            ArtworkColumn.Width = new GridLength(1, GridUnitType.Star);
+            Artwork.HorizontalAlignment = HorizontalAlignment.Center;
             MetadataPanel.Visibility = Visibility.Collapsed;
             MetadataColumn.Width = new GridLength(0);
-            ControlsColumn.Width = new GridLength(1, GridUnitType.Star);
-
-            var buttonWidth = Math.Max(24, (width - 8) / 4);
-            LyricsButton.Width = buttonWidth;
-            PreviousButton.Width = buttonWidth;
-            ToggleButton.Width = buttonWidth;
-            NextButton.Width = buttonWidth;
+            ControlsColumn.Width = new GridLength(0);
+            PlaybackControls.Visibility = Visibility.Collapsed;
+            SetHoverPlaybackOnlyMode(true);
             return;
         }
 
-        LyricsButton.Width = 24;
+        Artwork.Visibility = Visibility.Visible;
+        Artwork.HorizontalAlignment = HorizontalAlignment.Left;
+        ArtworkColumn.Width = new GridLength(50);
+        PlaybackControls.Visibility = Visibility.Visible;
+        SetHoverPlaybackOnlyMode(false);
         PreviousButton.Width = 22;
         ToggleButton.Width = 30;
         NextButton.Width = 22;
-        ControlsColumn.Width = new GridLength(112);
+
+        if (effectiveMode == WidgetDisplayMode.CoverAndControls)
+        {
+            LyricsButton.Visibility = Visibility.Collapsed;
+            LyricsButton.Width = 0;
+            MetadataPanel.Visibility = Visibility.Collapsed;
+            MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
+            ControlsColumn.Width = new GridLength(74);
+            return;
+        }
+
+        LyricsButton.Visibility = Visibility.Visible;
+        LyricsButton.Width = 24;
         MetadataPanel.Visibility = Visibility.Visible;
         MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
-
-        var showArtwork = width >= 300;
-        Artwork.Visibility = showArtwork ? Visibility.Visible : Visibility.Collapsed;
-        ArtworkColumn.Width = showArtwork ? new GridLength(50) : new GridLength(0);
+        ControlsColumn.Width = new GridLength(112);
         ScheduleMarqueeRefresh();
     }
+
+    private double GetWidthForMode(double availableWidth)
+    {
+        var preferred = _displayMode switch
+        {
+            WidgetDisplayMode.CoverOnly => MinimumWidth,
+            WidgetDisplayMode.CoverAndControls => TransportLayoutWidth,
+            _ => DefaultWidth
+        };
+        return Math.Min(preferred, availableWidth);
+    }
+
+    private void UpdateDisplayModeMenuChecks()
+    {
+        foreach (var item in RootBorder.ContextMenu?.Items.OfType<MenuItem>() ?? [])
+        {
+            if (Enum.TryParse<WidgetDisplayMode>(item.Tag?.ToString(), out var mode))
+                item.IsChecked = mode == _displayMode;
+        }
+    }
+
+    private void OnDisplayModeClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem item ||
+            !Enum.TryParse<WidgetDisplayMode>(item.Tag?.ToString(), out var mode))
+            return;
+
+        SetDisplayMode(mode);
+        DisplayModeChanged?.Invoke(this, mode);
+    }
+
+    private void SetHoverPlaybackOnlyMode(bool enabled)
+    {
+        _hoverPlaybackOnlyMode = enabled;
+        Artwork.Background = enabled
+            ? Brushes.Transparent
+            : new SolidColorBrush(Color.FromRgb(38, 53, 61));
+        HoverPlaybackButton.Visibility = enabled && Artwork.IsMouseOver
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void OnArtworkMouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_hoverPlaybackOnlyMode)
+            HoverPlaybackButton.Visibility = Visibility.Visible;
+    }
+
+    private void OnArtworkMouseLeave(object sender, System.Windows.Input.MouseEventArgs e) =>
+        HoverPlaybackButton.Visibility = Visibility.Collapsed;
+
+    private void OnHoverPlaybackClick(object sender, RoutedEventArgs e) =>
+        ToggleRequested?.Invoke(this, EventArgs.Empty);
 
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
@@ -461,18 +555,6 @@ public partial class MusicOverlayWindow : Window
     {
         SetLyricsMode(!_lyricsMode);
         LyricsModeChanged?.Invoke(this, _lyricsMode);
-    }
-
-    private void OnRootMouseRightButtonUp(
-        object sender,
-        System.Windows.Input.MouseButtonEventArgs e)
-    {
-        if (sender is FrameworkElement element && element.ContextMenu is { } menu)
-        {
-            menu.PlacementTarget = element;
-            menu.IsOpen = true;
-            e.Handled = true;
-        }
     }
 
     private void OnExitClick(object sender, RoutedEventArgs e) => Close();

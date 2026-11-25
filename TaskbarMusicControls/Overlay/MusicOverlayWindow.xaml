@@ -61,16 +61,57 @@
             <Setter Property="Foreground" Value="#167C69"/>
             <Setter Property="FontSize" Value="18"/>
         </Style>
+
+        <Style x:Key="HoverPlaybackButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#22000000"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonSurface"
+                                Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="#44000000"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="#66000000"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
-    <Border Background="Transparent"
+    <Border x:Name="RootBorder"
+            Background="Transparent"
             BorderBrush="Transparent"
             BorderThickness="0"
-            Padding="0"
-            MouseRightButtonUp="OnRootMouseRightButtonUp">
+            Padding="0">
 
         <Border.ContextMenu>
             <ContextMenu>
+                <MenuItem Header="Full layout"
+                          Tag="FullDetails"
+                          IsCheckable="True"
+                          IsChecked="True"
+                          Click="OnDisplayModeClick"/>
+                <MenuItem Header="Cover and controls"
+                          Tag="CoverAndControls"
+                          IsCheckable="True"
+                          Click="OnDisplayModeClick"/>
+                <MenuItem Header="Cover only (hover to play/pause)"
+                          Tag="CoverOnly"
+                          IsCheckable="True"
+                          Click="OnDisplayModeClick"/>
+                <Separator/>
                 <MenuItem Header="Exit Taskbar Music Widget"
                           Click="OnExitClick"/>
             </ContextMenu>
@@ -89,7 +130,9 @@
                 <Border x:Name="Artwork"
                         Width="48"
                         Height="48"
-                        VerticalAlignment="Center">
+                        VerticalAlignment="Center"
+                        MouseEnter="OnArtworkMouseEnter"
+                        MouseLeave="OnArtworkMouseLeave">
 
                     <Border.Background>
                         <SolidColorBrush Color="#26353D"/>
@@ -107,6 +150,19 @@
                         <Image x:Name="ArtworkImage"
                                Stretch="UniformToFill"
                                Visibility="Collapsed"/>
+
+                        <Button x:Name="HoverPlaybackButton"
+                                Style="{StaticResource HoverPlaybackButtonStyle}"
+                                Width="48"
+                                Height="48"
+                                Padding="0"
+                                FontSize="20"
+                                Focusable="False"
+                                IsEnabled="False"
+                                Visibility="Collapsed"
+                                Content="{Binding Content, ElementName=ToggleButton}"
+                                AutomationProperties.Name="Play or pause"
+                                Click="OnHoverPlaybackClick"/>
                     </Grid>
                 </Border>
 
@@ -174,7 +230,8 @@
                 </Grid>
 
                 <!-- Playback controls -->
-                <StackPanel Grid.Column="2"
+                <StackPanel x:Name="PlaybackControls"
+                            Grid.Column="2"
                             Orientation="Horizontal"
                             VerticalAlignment="Center">
 
