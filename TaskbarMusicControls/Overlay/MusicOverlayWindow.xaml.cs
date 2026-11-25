@@ -41,6 +41,8 @@ public partial class MusicOverlayWindow : Window
     private string _currentTitle = "No media playing";
     private string _currentArtist = "Start playback in a media app";
     private bool _lyricsMode;
+    private TimeSpan _lyricsOffset;
+    private TimeSpan _lastLyricsPosition;
     private bool _hoverPlaybackOnlyMode;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
     private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
@@ -60,6 +62,7 @@ public partial class MusicOverlayWindow : Window
     public event Action<object?, bool>? LyricsModeChanged;
     internal event Action<object?, WidgetDisplayMode>? DisplayModeChanged;
     internal event Action<object?, LyricsSourcePreference>? LyricsSourceChanged;
+    internal event Action<object?, TimeSpan>? LyricsOffsetChanged;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -135,7 +138,10 @@ public partial class MusicOverlayWindow : Window
     internal void UpdateLyrics(LyricsDocument? lyrics, TimeSpan position)
     {
         _lyrics = lyrics;
-        var lyricPosition = position + TimeSpan.FromSeconds(0);
+        _lastLyricsPosition = position;
+        var lyricPosition = position - _lyricsOffset;
+        if (lyricPosition < TimeSpan.Zero)
+            lyricPosition = TimeSpan.Zero;
         var current = lyrics?.At(lyricPosition);
         var originalFrame = current?.Original;
         var translationFrame = current?.Translation;
@@ -370,6 +376,32 @@ public partial class MusicOverlayWindow : Window
 
         SetLyricsSource(preference);
         LyricsSourceChanged?.Invoke(this, preference);
+    }
+
+    internal void SetLyricsOffset(TimeSpan offset)
+    {
+        _lyricsOffset = offset;
+        var offsetMenu = RootBorder.ContextMenu?.Items.OfType<MenuItem>()
+            .FirstOrDefault(menu => menu.Header?.ToString() == "Lyric timing (this song)");
+        foreach (var item in offsetMenu?.Items.OfType<MenuItem>() ?? [])
+        {
+            item.IsCheckable = true;
+            item.IsChecked = int.TryParse(item.Tag?.ToString(), out var milliseconds) &&
+                milliseconds == (int)offset.TotalMilliseconds;
+        }
+        if (_lyrics is not null)
+            UpdateLyrics(_lyrics, _lastLyricsPosition);
+    }
+
+    private void OnLyricsOffsetClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem item ||
+            !int.TryParse(item.Tag?.ToString(), out var milliseconds))
+            return;
+
+        var offset = TimeSpan.FromMilliseconds(milliseconds);
+        SetLyricsOffset(offset);
+        LyricsOffsetChanged?.Invoke(this, offset);
     }
 
     private void SetHoverPlaybackOnlyMode(bool enabled)

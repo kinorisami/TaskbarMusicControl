@@ -1,6 +1,5 @@
 using System.Windows;
 using System.Windows.Threading;
-using System.Diagnostics;
 using TaskbarMusicControls.Overlay;
 
 namespace TaskbarMusicControls.Services;
@@ -16,6 +15,10 @@ internal sealed class TaskbarMusicWidgetService
     private readonly DispatcherTimer _lyricsTimer = new()
     {
         Interval = TimeSpan.FromMilliseconds(120)
+    };
+    private readonly DispatcherTimer _timelineSyncTimer = new()
+    {
+        Interval = TimeSpan.FromSeconds(1)
     };
     private readonly DispatcherTimer _layoutTimer = new()
     {
@@ -41,6 +44,7 @@ internal sealed class TaskbarMusicWidgetService
     private bool _lyricsMode;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
     private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
+    private TimeSpan _lyricsOffset;
 
     public TaskbarMusicWidgetService()
     {
@@ -48,6 +52,7 @@ internal sealed class TaskbarMusicWidgetService
         _layoutChangeTimer.Tick += OnLayoutChangeTimerTick;
         _nativeHandleTimer.Tick += OnNativeHandleTimerTick;
         _lyricsTimer.Tick += OnLyricsTimerTick;
+        _timelineSyncTimer.Tick += OnTimelineSyncTimerTick;
         _layoutMonitor.LayoutChanged += OnTaskbarLayoutChanged;
         _taskbarWindowMonitor.TaskbarCreated += OnTaskbarCreated;
         _mediaSessionService.StateChanged += OnMediaSessionStateChanged;
@@ -96,6 +101,7 @@ internal sealed class TaskbarMusicWidgetService
             _ = _mediaSessionService.SkipNextAsync();
         overlay.LyricsModeChanged += OnLyricsModeChanged;
         overlay.LyricsSourceChanged += OnLyricsSourceChanged;
+        overlay.LyricsOffsetChanged += OnLyricsOffsetChanged;
         overlay.DisplayModeChanged += OnDisplayModeChanged;
         overlay.Closed += OnOverlayClosed;
 
@@ -133,6 +139,12 @@ internal sealed class TaskbarMusicWidgetService
             StartLyricsLookup(_latestMediaState);
     }
 
+    private void OnLyricsOffsetChanged(object? sender, TimeSpan offset)
+    {
+        _lyricsOffset = offset;
+        LyricsOffsetStore.Save(_lyricsTrackKey, offset);
+    }
+
     private void OnMediaSessionStateChanged(MediaSessionState state)
     {
         var overlay = _overlay;
@@ -155,6 +167,8 @@ internal sealed class TaskbarMusicWidgetService
         {
             _lyricsTrackKey = trackKey;
             _lyrics = null;
+            _lyricsOffset = LyricsOffsetStore.Load(trackKey);
+            overlay.SetLyricsOffset(_lyricsOffset);
             overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
             StartLyricsLookup(state);
         }
@@ -165,7 +179,8 @@ internal sealed class TaskbarMusicWidgetService
         _lastArtwork = state.ArtworkBytes;
         overlay.UpdatePlaybackState(state.IsPlaying, state.CanPlayPause,
             state.CanGoPrevious, state.CanGoNext);
-        overlay.UpdateLyrics(_lyrics, GetCurrentPosition(state));
+        overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
+        UpdateTimelineSyncTimer(state);
     }
 
     private void StartLyricsLookup(MediaSessionState state)
@@ -175,7 +190,7 @@ internal sealed class TaskbarMusicWidgetService
         _lyricsLookupCancellation = new CancellationTokenSource();
         _lyrics = null;
         if (_overlay is { } overlay)
-            overlay.UpdateLyrics(null, GetCurrentPosition(state));
+            overlay.UpdateLyrics(null, _mediaSessionService.CurrentPosition);
         _ = FindLyricsAsync(_lyricsTrackKey, state, _lyricsSourcePreference,
             _lyricsLookupCancellation.Token);
     }
@@ -201,21 +216,12 @@ internal sealed class TaskbarMusicWidgetService
                     return;
                 _lyrics = result;
                 if (_lyricsMode && _lyrics?.IsTimed == true) _lyricsTimer.Start();
-                overlay.UpdateLyrics(_lyrics, GetCurrentPosition(_latestMediaState));
+                overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
+                UpdateTimelineSyncTimer(_latestMediaState);
             });
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception) { /* A failed lyric lookup leaves the metadata visible. */ }
-    }
-
-    private static TimeSpan GetCurrentPosition(MediaSessionState state)
-    {
-        var position = state.Position;
-        if (state.IsPlaying && state.PositionUpdatedAt != 0)
-            position += Stopwatch.GetElapsedTime(state.PositionUpdatedAt);
-        if (state.Duration > TimeSpan.Zero && position > state.Duration)
-            position = state.Duration;
-        return position < TimeSpan.Zero ? TimeSpan.Zero : position;
     }
 
     private void OnLyricsModeChanged(object? sender, bool enabled)
@@ -231,7 +237,9 @@ internal sealed class TaskbarMusicWidgetService
             _lyricsTimer.Stop();
         }
         if (!enabled && _overlay is { } overlay)
-            overlay.UpdateLyrics(_lyrics, GetCurrentPosition(_latestMediaState));
+            overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
+        if (!enabled)
+            _timelineSyncTimer.Stop();
     }
 
     private async Task RefreshPositionWhenLyricsOpenedAsync()
@@ -242,16 +250,28 @@ internal sealed class TaskbarMusicWidgetService
         {
             _latestMediaState = state;
             if (_overlay is { } overlay)
-                overlay.UpdateLyrics(_lyrics, GetCurrentPosition(state));
+                overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
             if (_lyricsMode && _lyrics?.IsTimed == true)
                 _lyricsTimer.Start();
+            UpdateTimelineSyncTimer(state);
         });
     }
 
     private void OnLyricsTimerTick(object? sender, EventArgs e)
     {
         if (_overlay is { } overlay)
-            overlay.UpdateLyrics(_lyrics, GetCurrentPosition(_latestMediaState));
+            overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
+    }
+
+    private void OnTimelineSyncTimerTick(object? sender, EventArgs e)
+        => _ = _mediaSessionService.RefreshTimelineNowAsync();
+
+    private void UpdateTimelineSyncTimer(MediaSessionState state)
+    {
+        if (_lyricsMode && _lyrics?.IsTimed == true && state.IsPlaying)
+            _timelineSyncTimer.Start();
+        else
+            _timelineSyncTimer.Stop();
     }
 
     private void OnLayoutTimerTick(object? sender, EventArgs e)
@@ -394,6 +414,7 @@ internal sealed class TaskbarMusicWidgetService
         _layoutChangeTimer.Stop();
         _nativeHandleTimer.Stop();
         _lyricsTimer.Stop();
+        _timelineSyncTimer.Stop();
         _lyricsLookupCancellation?.Cancel();
         _lyricsLookupCancellation?.Dispose();
         _layoutMonitor.Dispose();

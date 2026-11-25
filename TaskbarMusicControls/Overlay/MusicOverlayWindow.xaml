@@ -119,6 +119,18 @@
                     <MenuItem Header="LRCLIB"
                               Tag="Lrclib" Click="OnLyricsSourceClick"/>
                 </MenuItem>
+                <MenuItem Header="Lyric timing (this song)">
+                    <MenuItem Header="No adjustment" Tag="0" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Advance 0.2 s" Tag="-200" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Advance 0.5 s" Tag="-500" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Advance 1 s" Tag="-1000" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Advance 2 s" Tag="-2000" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Delay 0.2 s" Tag="200" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Delay 0.5 s" Tag="500" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Delay 1 s" Tag="1000" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Delay 2 s" Tag="2000" Click="OnLyricsOffsetClick"/>
+                    <MenuItem Header="Delay 6 s" Tag="6000" Click="OnLyricsOffsetClick"/>
+                </MenuItem>
                 <Separator/>
                 <MenuItem Header="Exit Taskbar Music Widget"
                           Click="OnExitClick"/>

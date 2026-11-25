@@ -1,6 +1,5 @@
 using Windows.Media.Control;
 using Windows.Storage.Streams;
-using System.Diagnostics;
 
 namespace TaskbarMusicControls.Services;
 
@@ -8,11 +7,14 @@ internal sealed class MediaSessionService
 {
     private const uint MaxArtworkBytes = 8 * 1024 * 1024;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly PlaybackClock _playbackClock = new();
     private GlobalSystemMediaTransportControlsSessionManager? _manager;
     private GlobalSystemMediaTransportControlsSession? _session;
+    private string _clockTrackIdentity = "";
 
     public event Action<MediaSessionState>? StateChanged;
     public MediaSessionState CurrentState { get; private set; } = MediaSessionState.Empty;
+    public TimeSpan CurrentPosition => _playbackClock.GetCurrentPosition();
 
     public async Task InitializeAsync()
     {
@@ -34,7 +36,7 @@ internal sealed class MediaSessionService
     public Task RefreshTimelineNowAsync()
     {
         var session = _session;
-        return session is null || !CurrentState.IsPlaying
+        return session is null
             ? Task.CompletedTask
             : RefreshTimelineAsync(session);
     }
@@ -102,6 +104,8 @@ internal sealed class MediaSessionService
                 }
 
                 _session = nextSession;
+                _clockTrackIdentity = "";
+                _playbackClock.Reset("session-changed");
                 if (_session is not null)
                 {
                     _session.MediaPropertiesChanged += OnMediaPropertiesChanged;
@@ -132,8 +136,14 @@ internal sealed class MediaSessionService
                 return;
 
             var properties = await changedSession.TryGetMediaPropertiesAsync();
-            var artwork = await ReadArtworkAsync(properties.Thumbnail);
             var timeline = changedSession.GetTimelineProperties();
+            if (!ReferenceEquals(changedSession, _session))
+                return;
+
+            ResetClockIfTrackChanged(properties.Title, properties.Artist, properties.AlbumTitle);
+            _playbackClock.Synchronize(timeline, CurrentState.IsPlaying, timeline.EndTime,
+                "media-properties");
+            var artwork = await ReadArtworkAsync(properties.Thumbnail);
             if (!ReferenceEquals(changedSession, _session))
                 return;
 
@@ -143,9 +153,7 @@ internal sealed class MediaSessionService
                 Artist = properties.Artist,
                 Album = properties.AlbumTitle,
                 ArtworkBytes = artwork,
-                Duration = timeline.EndTime,
-                Position = timeline.Position,
-                PositionUpdatedAt = Stopwatch.GetTimestamp()
+                Duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : CurrentState.Duration
             });
         }
         catch (Exception)
@@ -173,9 +181,10 @@ internal sealed class MediaSessionService
                 GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
             var canPlayPause = controls.IsPlayPauseToggleEnabled ||
                 (isPlaying ? controls.IsPauseEnabled : controls.IsPlayEnabled);
-            // Freeze the locally estimated position on pause and re-anchor it on resume.
-            // A few media sessions report a default zero timeline during playback-state changes.
-            var position = EstimatePosition(CurrentState);
+            var timeline = changedSession.GetTimelineProperties();
+            _playbackClock.Synchronize(timeline, isPlaying,
+                timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : CurrentState.Duration,
+                "playback-state");
 
             if (!ReferenceEquals(changedSession, _session))
                 return;
@@ -186,8 +195,7 @@ internal sealed class MediaSessionService
                 CanPlayPause = canPlayPause,
                 CanGoPrevious = controls.IsPreviousEnabled,
                 CanGoNext = controls.IsNextEnabled,
-                Position = position,
-                PositionUpdatedAt = Stopwatch.GetTimestamp()
+                Duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : CurrentState.Duration
             });
         }
         catch (Exception)
@@ -209,11 +217,12 @@ internal sealed class MediaSessionService
             if (!ReferenceEquals(changedSession, _session))
                 return;
             var timeline = changedSession.GetTimelineProperties();
+            var duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : CurrentState.Duration;
+            _playbackClock.Synchronize(timeline, CurrentState.IsPlaying, duration,
+                "timeline-event-or-poll");
             Publish(CurrentState with
             {
-                Position = timeline.Position,
-                PositionUpdatedAt = Stopwatch.GetTimestamp(),
-                Duration = timeline.EndTime
+                Duration = duration
             });
         }
         catch (Exception)
@@ -238,7 +247,12 @@ internal sealed class MediaSessionService
         var properties = await session.TryGetMediaPropertiesAsync();
         var playbackInfo = session.GetPlaybackInfo();
         var timeline = session.GetTimelineProperties();
+        var isPlaying = playbackInfo.PlaybackStatus ==
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+        ResetClockIfTrackChanged(properties.Title, properties.Artist, properties.AlbumTitle);
+        _playbackClock.Synchronize(timeline, isPlaying, timeline.EndTime, "session-start");
         var controls = playbackInfo.Controls;
+        // The position anchor has already been captured; artwork loading cannot delay it.
         var artwork = await ReadArtworkAsync(properties.Thumbnail);
         if (!ReferenceEquals(session, _session))
             return;
@@ -247,8 +261,7 @@ internal sealed class MediaSessionService
             properties.Title,
             properties.Artist,
             artwork,
-            playbackInfo.PlaybackStatus ==
-                GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
+            isPlaying,
             controls.IsPlayPauseToggleEnabled ||
                 (playbackInfo.PlaybackStatus ==
                     GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
@@ -257,9 +270,7 @@ internal sealed class MediaSessionService
             controls.IsPreviousEnabled,
             controls.IsNextEnabled,
             properties.AlbumTitle,
-            timeline.EndTime,
-            timeline.Position,
-            Stopwatch.GetTimestamp()));
+            timeline.EndTime));
     }
 
     private static async Task<byte[]?> ReadArtworkAsync(
@@ -296,14 +307,13 @@ internal sealed class MediaSessionService
         StateChanged?.Invoke(state);
     }
 
-    private static TimeSpan EstimatePosition(MediaSessionState state)
+    private void ResetClockIfTrackChanged(string title, string artist, string album)
     {
-        var position = state.Position;
-        if (state.IsPlaying && state.PositionUpdatedAt != 0)
-            position += Stopwatch.GetElapsedTime(state.PositionUpdatedAt);
-        if (state.Duration > TimeSpan.Zero && position > state.Duration)
-            position = state.Duration;
-        return position < TimeSpan.Zero ? TimeSpan.Zero : position;
+        var identity = $"{artist}\u001f{title}\u001f{album}";
+        if (identity == _clockTrackIdentity)
+            return;
+        _clockTrackIdentity = identity;
+        _playbackClock.Reset("track-changed");
     }
 
 }
@@ -317,9 +327,7 @@ internal sealed record MediaSessionState(
     bool CanGoPrevious,
     bool CanGoNext,
     string Album = "",
-    TimeSpan Duration = default,
-    TimeSpan Position = default,
-    long PositionUpdatedAt = 0)
+    TimeSpan Duration = default)
 {
     public static MediaSessionState Empty { get; } = new(
         "No media playing",
