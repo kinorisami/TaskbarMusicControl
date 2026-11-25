@@ -17,8 +17,9 @@
 - 监视 Windows 任务栏变化，并在 Explorer 重启后尝试重新挂接组件。
 
 ## 显示布局
-
-
+<img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/4e5039e8-d40f-463c-9961-0be89d8f883f" />
+<img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/39170e90-c827-454b-97fe-f72b75d06370" />
+<img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/68f5bed3-bc58-409a-b910-d75494a29516" />
 
 ## 系统要求
 
@@ -113,6 +114,3 @@ LRC 时间戳用于跟随播放进度；同一时间戳的连续两行会作为�
 - 歌词同步精度还受歌词时间戳和录音版本影响。
 - 任务栏可用区域依赖 UI Automation 扫描；部分 Explorer 版本不暴露预期控件时，组件可能无法定位。
 
-## 许可证
-
-当前仓库尚未包含许可证文件。公开发布前，请添加适合项目的开源许可证；没有许可证时，其他人通常不能默认获得复制、修改或再发布项目的权限。
