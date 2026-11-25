@@ -74,6 +74,7 @@ public partial class MusicOverlayWindow : Window
     {
         InitializeComponent();
         SourceInitialized += OnSourceInitialized;
+        IsVisibleChanged += OnIsVisibleChanged;
     }
 
     public void UpdateMedia(string title, string artist, byte[]? artworkBytes)
@@ -101,13 +102,23 @@ public partial class MusicOverlayWindow : Window
         try
         {
             using var stream = new MemoryStream(artworkBytes, writable: false);
+            var dpi = GetDpiScale(_taskbarHandle);
+            // Decode at the rendered 48x48 DIP cover size (96px at 200%) so WPF does
+            // not keep a full-resolution bitmap alive for a 48px thumbnail.
+            var decodeWidth = (int)Math.Max(
+                48,
+                Math.Ceiling(48 * Math.Max(dpi.DpiScaleX, dpi.DpiScaleY)));
             var image = new BitmapImage();
             image.BeginInit();
             image.CacheOption = BitmapCacheOption.OnLoad;
+            image.DecodePixelWidth = decodeWidth;
             image.StreamSource = stream;
             image.EndInit();
             image.Freeze();
 
+            // Drop the previous bitmap before handing over the new one so old and
+            // new artwork never both stay referenced.
+            ArtworkImage.Source = null;
             ArtworkImage.Source = image;
             ArtworkImage.Visibility = Visibility.Visible;
             ArtworkGlyph.Visibility = Visibility.Collapsed;
@@ -575,6 +586,31 @@ public partial class MusicOverlayWindow : Window
         if (refreshTranslation && _renderedTranslation is not null)
             UpdateLyricsMarquee(LyricsTranslationCanvas, LyricsTranslationText,
                 _renderedTranslation, false, _translationTimeRemaining);
+    }
+
+    private void OnIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (IsVisible)
+            ScheduleMarqueeRefresh();
+        else
+            StopMarqueeAnimations();
+    }
+
+    private void StopMarqueeAnimations()
+    {
+        StopTextMarquee(TitleTranslation);
+        StopTextMarquee(ArtistTranslation);
+        StopTextMarquee(LyricsOriginalText.RenderTransform as TranslateTransform);
+        StopTextMarquee(LyricsTranslationText.RenderTransform as TranslateTransform);
+    }
+
+    private static void StopTextMarquee(TranslateTransform? transform)
+    {
+        if (transform is null)
+            return;
+
+        transform.BeginAnimation(TranslateTransform.XProperty, null);
+        transform.X = 0;
     }
 
     private static void UpdateLyricsMarquee(

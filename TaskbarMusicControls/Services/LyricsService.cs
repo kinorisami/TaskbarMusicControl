@@ -13,59 +13,95 @@ internal enum LyricsSourcePreference { Automatic, Netease, Lrclib }
 internal sealed record LyricTrackLine(TimeSpan? Time, string Text);
 internal sealed record LyricFrame(string Text, TimeSpan? Time, TimeSpan? NextTime);
 internal sealed record LyricsFrame(LyricFrame? Original, LyricFrame? Translation);
-internal sealed record LyricsDocument(
-    IReadOnlyList<LyricTrackLine> OriginalLines,
-    IReadOnlyList<LyricTrackLine> TranslationLines)
+internal sealed class LyricsDocument
 {
+    private readonly LyricTrackLine[] _originalTimed;
+    private readonly LyricTrackLine[] _translationTimed;
+    private readonly string? _originalUntimed;
+    private readonly string? _translationUntimed;
+
     public LyricsDocument(IReadOnlyList<LyricTrackLine> originalLines)
         : this(originalLines, Array.Empty<LyricTrackLine>()) { }
 
+    public LyricsDocument(
+        IReadOnlyList<LyricTrackLine> originalLines,
+        IReadOnlyList<LyricTrackLine> translationLines)
+    {
+        OriginalLines = originalLines;
+        TranslationLines = translationLines;
+        _originalTimed = BuildTimed(originalLines);
+        _translationTimed = BuildTimed(translationLines);
+        _originalUntimed = FindUntimed(originalLines);
+        _translationUntimed = FindUntimed(translationLines);
+    }
+
+    public IReadOnlyList<LyricTrackLine> OriginalLines { get; }
+    public IReadOnlyList<LyricTrackLine> TranslationLines { get; }
+
     public bool HasLyrics => OriginalLines.Count > 0;
-    public bool IsTimed => OriginalLines.Any(line => line.Time.HasValue);
+    public bool IsTimed => _originalTimed.Length > 0;
 
     public LyricsFrame? At(TimeSpan position)
     {
         if (!HasLyrics) return null;
-        return new LyricsFrame(AtTrack(OriginalLines, position),
-            AtTrack(TranslationLines, position));
+        return new LyricsFrame(
+            AtTrack(_originalTimed, _originalUntimed, position),
+            AtTrack(_translationTimed, _translationUntimed, position));
     }
 
-    private static LyricFrame? AtTrack(IReadOnlyList<LyricTrackLine> lines, TimeSpan position)
+    private static LyricFrame? AtTrack(
+        LyricTrackLine[] timed,
+        string? untimedText,
+        TimeSpan position)
     {
-        if (lines.Count == 0) return null;
-        var index = -1;
-        var hasTimedLine = false;
-        for (var i = 0; i < lines.Count; i++)
+        if (timed.Length > 0)
         {
-            if (!lines[i].Time.HasValue) continue;
-            hasTimedLine = true;
-            if (lines[i].Time!.Value <= position) index = i;
-            else break;
+            var index = FindLastIndexAtOrBefore(timed, position);
+            // Wait for the first timestamp instead of scrolling an upcoming lyric during the intro.
+            if (index < 0) return null;
+
+            var current = timed[index];
+            TimeSpan? nextTime = index + 1 < timed.Length
+                ? timed[index + 1].Time
+                : null;
+            return new LyricFrame(current.Text, current.Time, nextTime);
         }
 
-        if (!hasTimedLine)
-        {
-            // Untimed-only tracks show their plain text; they have no sync timeline.
-            foreach (var line in lines)
-            {
-                if (!line.Time.HasValue && !string.IsNullOrWhiteSpace(line.Text))
-                    return new LyricFrame(line.Text, null, null);
-            }
-            return null;
-        }
-
-        // Wait for the first timestamp instead of scrolling an upcoming lyric during the intro.
-        if (index < 0) return null;
-        var current = lines[index];
-        TimeSpan? nextTime = null;
-        for (var next = index + 1; next < lines.Count; next++)
-        {
-            if (!lines[next].Time.HasValue) continue;
-            nextTime = lines[next].Time;
-            break;
-        }
-        return new LyricFrame(current.Text, current.Time, nextTime);
+        // Untimed-only tracks show their plain text; they have no sync timeline.
+        return untimedText is null
+            ? null
+            : new LyricFrame(untimedText, null, null);
     }
+
+    private static int FindLastIndexAtOrBefore(LyricTrackLine[] lines, TimeSpan position)
+    {
+        var lo = 0;
+        var hi = lines.Length - 1;
+        var result = -1;
+        while (lo <= hi)
+        {
+            var mid = lo + (hi - lo) / 2;
+            if (lines[mid].Time!.Value <= position)
+            {
+                result = mid;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+        return result;
+    }
+
+    private static LyricTrackLine[] BuildTimed(IReadOnlyList<LyricTrackLine> lines) =>
+        lines.Where(line => line.Time.HasValue)
+            .OrderBy(line => line.Time!.Value)
+            .ToArray();
+
+    private static string? FindUntimed(IReadOnlyList<LyricTrackLine> lines) =>
+        lines.FirstOrDefault(line =>
+            !line.Time.HasValue && !string.IsNullOrWhiteSpace(line.Text))?.Text;
 }
 
 internal interface ILyricsProvider
