@@ -5,7 +5,7 @@ namespace TaskbarMusicControls.Services;
 
 internal sealed class MediaSessionService
 {
-    private const uint MaxArtworkBytes = 8 * 1024 * 1024;
+    private const uint MaxArtworkBytes = 2 * 1024 * 1024;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly PlaybackClock _playbackClock = new();
     private GlobalSystemMediaTransportControlsSessionManager? _manager;

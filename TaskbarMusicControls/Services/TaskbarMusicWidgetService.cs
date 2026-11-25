@@ -26,7 +26,7 @@ internal sealed class TaskbarMusicWidgetService
     };
     private readonly DispatcherTimer _layoutChangeTimer = new()
     {
-        Interval = TimeSpan.FromMilliseconds(400)
+        Interval = TimeSpan.FromMilliseconds(300)
     };
     private readonly DispatcherTimer _nativeHandleTimer = new()
     {
@@ -50,6 +50,7 @@ internal sealed class TaskbarMusicWidgetService
     private IntPtr _positionedTaskbar;
     private Rect _positionedTaskbarBounds;
     private Rect _positionedAvailableBounds;
+    private bool _forceReposition;
 
     private sealed record TaskbarLayoutEntry(
         TaskbarInfo Taskbar,
@@ -148,6 +149,22 @@ internal sealed class TaskbarMusicWidgetService
     {
         _displayMode = mode;
         WidgetDisplayModeStore.Save(mode);
+
+        if (_overlay is { } overlay &&
+            _positionedTaskbar != 0 &&
+            !_positionedTaskbarBounds.IsEmpty &&
+            !_positionedAvailableBounds.IsEmpty)
+        {
+            // Apply the new width/layout right away with the last known taskbar
+            // layout instead of waiting for the debounced UIA re-scan.
+            if (overlay.PositionInAvailableArea(
+                    _positionedTaskbar,
+                    _positionedTaskbarBounds,
+                    _positionedAvailableBounds))
+                return;
+        }
+
+        _forceReposition = true;
         ScheduleLayoutRefresh();
     }
 
@@ -389,7 +406,10 @@ internal sealed class TaskbarMusicWidgetService
                         break;
                     }
 
-                    var samePlacement = _positionedTaskbar == taskbar &&
+                    var forceReposition = _forceReposition;
+                    _forceReposition = false;
+                    var samePlacement = !forceReposition &&
+                        _positionedTaskbar == taskbar &&
                         RectsNearEqual(layout.TaskbarBounds, _positionedTaskbarBounds) &&
                         RectsNearEqual(layout.AvailableBounds, _positionedAvailableBounds);
 

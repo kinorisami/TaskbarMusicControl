@@ -116,6 +116,9 @@ public partial class MusicOverlayWindow : Window
             image.EndInit();
             image.Freeze();
 
+            // Drop the previous bitmap before handing over the new one so old and
+            // new artwork never both stay referenced.
+            ArtworkImage.Source = null;
             ArtworkImage.Source = image;
             ArtworkImage.Visibility = Visibility.Visible;
             ArtworkGlyph.Visibility = Visibility.Collapsed;
