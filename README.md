@@ -13,8 +13,12 @@
   - **Automatic**：依次查找本地歌词、网易云音乐、LRCLIB。
   - **NetEase Music**：只使用网易云音乐接口及对应缓存。
   - **LRCLIB**：只使用 LRCLIB 接口及对应缓存。
-- 右键组件可退出程序。
+- 右键组件可切换显示布局、选择歌词来源、调整歌词偏移、选择要挂载的任务栏/显示器，以及退出程序。
 - 监视 Windows 任务栏变化，并在 Explorer 重启后尝试重新挂接组件。
+
+## 显示布局
+
+
 
 ## 系统要求
 
@@ -48,13 +52,13 @@ dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj `
   -c Release -r win-x64 --self-contained true
 ```
 
-发布文件位于 `TaskbarMusicControls/bin/Release/` 下对应的目标框架和运行时目录中。将完整发布目录打包分享，不要只复制主程序文件。
+发布文件位于 `TaskbarMusicControls/bin/Release/` 下对应的目标框架和运行时目录中。
 
 ## 使用
 
 1. 启动支持 Windows 媒体会话的播放器并开始播放。
 2. 启动组件；它会自动检测任务栏并读取当前媒体会话。
-3. 右键任务栏组件切换布局、选择歌词来源或退出。
+3. 右键任务栏组件切换布局、选择歌词来源、调整歌词偏移、选择任务栏或退出。
 
 ### 本地歌词
 
@@ -73,7 +77,18 @@ dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj `
 歌曲名.txt
 ```
 
-带时间戳的 LRC 可用于逐句同步；纯文本歌词不能逐句同步。在线获取的歌词会缓存在 `Lyrics\Cache` 子目录中。
+LRC 时间戳用于跟随播放进度；同一时间戳的连续两行会作为原词和译词上下显示：
+
+```text
+[00:12.00]Original lyric
+[00:12.00]译文
+```
+
+带时间戳的 LRC 可用于逐句同步；纯文本歌词不能逐句同步。
+
+本地没有匹配歌词时，先查询网易云，再回退到 LRCLIB；在线歌词不可用或都没有匹配结果时，控件继续显示歌曲名和艺人名。在线歌词会按来源及艺人、歌曲、专辑生成本地 JSON 缓存，保存在 `%LOCALAPPDATA%\TaskbarMusicControls\Lyrics\Cache`。后续先读网易云缓存，再尝试网易云直连接口，然后读 LRCLIB 缓存并回退到 LRCLIB。
+
+网易云采用非官方 Web API 的歌曲搜索与歌词接口；网易云更改或限制接口时，会自动继续尝试 LRCLIB。
 
 ### 配置文件
 
@@ -81,9 +96,11 @@ dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj `
 
 - `display-mode.txt`：显示布局。
 - `lyrics-source.txt`：歌词来源选择（`Automatic`、`Netease` 或 `Lrclib`）。
+- `taskbar.txt`：选中的任务栏/显示器设备 ID。
 - `Lyrics\Offsets`：按歌曲保存的歌词偏移。
 - `Lyrics\Cache`：在线歌词缓存。
-- `Logs\playback-sync.log`：播放位置校正诊断日志（达到大小上限后滚动备份）。
+- `Logs\playback-sync.log`：播放位置校正诊断日志（仅 Debug 构建）。
+- `Logs\taskbar-layout.log`：任务栏布局探测诊断日志（仅 Debug 构建）。
 
 ## 网络与隐私
 
@@ -94,6 +111,7 @@ dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj `
 - 组件通过将窗口挂接到 Windows Explorer 的任务栏窗口来实现融合显示；Windows 没有通用的第三方任务栏音乐组件接口，因此 Windows 更新或 Explorer 行为变化可能影响兼容性。
 - 歌曲信息、播放位置和控制能力取决于播放器通过 GSMTC 上报的数据；不同播放器支持程度不同。
 - 歌词同步精度还受歌词时间戳和录音版本影响。
+- 任务栏可用区域依赖 UI Automation 扫描；部分 Explorer 版本不暴露预期控件时，组件可能无法定位。
 
 ## 许可证
 

@@ -26,7 +26,7 @@ internal sealed class TaskbarMusicWidgetService
     };
     private readonly DispatcherTimer _layoutChangeTimer = new()
     {
-        Interval = TimeSpan.FromMilliseconds(300)
+        Interval = TimeSpan.FromMilliseconds(150)
     };
     private readonly DispatcherTimer _nativeHandleTimer = new()
     {
