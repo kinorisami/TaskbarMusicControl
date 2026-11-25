@@ -11,6 +11,9 @@ internal sealed class MediaSessionService
     private GlobalSystemMediaTransportControlsSessionManager? _manager;
     private GlobalSystemMediaTransportControlsSession? _session;
     private string _clockTrackIdentity = "";
+    private readonly object _artworkCacheGate = new();
+    private IRandomAccessStreamReference? _cachedThumbnail;
+    private byte[]? _cachedArtwork;
 
     public event Action<MediaSessionState>? StateChanged;
     public MediaSessionState CurrentState { get; private set; } = MediaSessionState.Empty;
@@ -343,11 +346,17 @@ internal sealed class MediaSessionService
         }
     }
 
-    private static async Task<byte[]?> ReadArtworkAsync(
+    private async Task<byte[]?> ReadArtworkAsync(
         IRandomAccessStreamReference? thumbnail)
     {
         if (thumbnail is null)
             return null;
+
+        lock (_artworkCacheGate)
+        {
+            if (ReferenceEquals(thumbnail, _cachedThumbnail))
+                return _cachedArtwork;
+        }
 
         try
         {
@@ -363,6 +372,11 @@ internal sealed class MediaSessionService
 
             var bytes = new byte[loadedBytes];
             reader.ReadBytes(bytes);
+            lock (_artworkCacheGate)
+            {
+                _cachedThumbnail = thumbnail;
+                _cachedArtwork = bytes;
+            }
             return bytes;
         }
         catch (Exception)

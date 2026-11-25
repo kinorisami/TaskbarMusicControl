@@ -26,7 +26,7 @@ internal sealed class TaskbarMusicWidgetService
     };
     private readonly DispatcherTimer _layoutChangeTimer = new()
     {
-        Interval = TimeSpan.FromMilliseconds(120)
+        Interval = TimeSpan.FromMilliseconds(400)
     };
     private readonly DispatcherTimer _nativeHandleTimer = new()
     {
@@ -214,7 +214,7 @@ internal sealed class TaskbarMusicWidgetService
         overlay.UpdatePlaybackState(state.IsPlaying, state.CanPlayPause,
             state.CanGoPrevious, state.CanGoNext);
         overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
-        UpdateTimelineSyncTimer(state);
+        UpdateTimers(state);
     }
 
     private void StartLyricsLookup(MediaSessionState state)
@@ -249,9 +249,8 @@ internal sealed class TaskbarMusicWidgetService
                 if (token.IsCancellationRequested || trackKey != _lyricsTrackKey || _overlay is not { } overlay)
                     return;
                 _lyrics = result;
-                if (_lyricsMode && _lyrics?.IsTimed == true) _lyricsTimer.Start();
                 overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
-                UpdateTimelineSyncTimer(_latestMediaState);
+                UpdateTimers(_latestMediaState);
             });
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -285,9 +284,7 @@ internal sealed class TaskbarMusicWidgetService
             _latestMediaState = state;
             if (_overlay is { } overlay)
                 overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
-            if (_lyricsMode && _lyrics?.IsTimed == true)
-                _lyricsTimer.Start();
-            UpdateTimelineSyncTimer(state);
+            UpdateTimers(state);
         });
     }
 
@@ -300,12 +297,19 @@ internal sealed class TaskbarMusicWidgetService
     private void OnTimelineSyncTimerTick(object? sender, EventArgs e)
         => _ = _mediaSessionService.RefreshTimelineNowAsync();
 
-    private void UpdateTimelineSyncTimer(MediaSessionState state)
+    private void UpdateTimers(MediaSessionState state)
     {
-        if (_lyricsMode && _lyrics?.IsTimed == true && state.IsPlaying)
+        var shouldRun = _lyricsMode && _lyrics?.IsTimed == true && state.IsPlaying;
+        if (shouldRun)
+        {
+            _lyricsTimer.Start();
             _timelineSyncTimer.Start();
+        }
         else
+        {
+            _lyricsTimer.Stop();
             _timelineSyncTimer.Stop();
+        }
     }
 
     private void OnLayoutTimerTick(object? sender, EventArgs e)
