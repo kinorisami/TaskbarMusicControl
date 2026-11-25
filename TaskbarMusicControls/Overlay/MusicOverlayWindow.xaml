@@ -17,7 +17,7 @@
             <Setter Property="Width" Value="24"/>
             <Setter Property="Height" Value="32"/>
             <Setter Property="Foreground" Value="#30343A"/>
-            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Background" Value="#01000000"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="FontSize" Value="20"/>
@@ -32,7 +32,8 @@
                                 CornerRadius="4">
                             <ContentPresenter
                                 HorizontalAlignment="Center"
-                                VerticalAlignment="Center"/>
+                                VerticalAlignment="Center"
+                                IsHitTestVisible="False"/>
                         </Border>
 
                         <ControlTemplate.Triggers>
@@ -76,7 +77,8 @@
                         <Border x:Name="ButtonSurface"
                                 Background="{TemplateBinding Background}">
                             <ContentPresenter HorizontalAlignment="Center"
-                                              VerticalAlignment="Center"/>
+                                              VerticalAlignment="Center"
+                                              IsHitTestVisible="False"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
