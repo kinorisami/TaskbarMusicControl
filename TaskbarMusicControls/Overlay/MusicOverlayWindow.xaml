@@ -82,7 +82,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition x:Name="ArtworkColumn" Width="50"/>
                     <ColumnDefinition x:Name="MetadataColumn" Width="*"/>
-                    <ColumnDefinition x:Name="ControlsColumn" Width="88"/>
+                    <ColumnDefinition x:Name="ControlsColumn" Width="112"/>
                 </Grid.ColumnDefinitions>
 
                 <!-- Album artwork -->
@@ -118,7 +118,7 @@
                       ClipToBounds="True"
                       SizeChanged="OnMetadataSizeChanged">
 
-                    <StackPanel VerticalAlignment="Center">
+                    <StackPanel x:Name="MetadataTextPanel" VerticalAlignment="Center">
                         <Canvas x:Name="TitleCanvas" Height="18" ClipToBounds="True">
                             <StackPanel Orientation="Horizontal">
                                 <StackPanel.RenderTransform>
@@ -154,12 +154,37 @@
                             </StackPanel>
                         </Canvas>
                     </StackPanel>
+
+                    <Grid x:Name="LyricsPanel"
+                          Height="38"
+                          VerticalAlignment="Center"
+                          ClipToBounds="True"
+                          Visibility="Collapsed">
+                        <Canvas x:Name="LyricsOriginalCanvas" Height="18" ClipToBounds="True"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="LyricsOriginalText" Foreground="#202124"
+                                       FontWeight="SemiBold" FontSize="13"/>
+                        </Canvas>
+                        <Canvas x:Name="LyricsTranslationCanvas" Height="16" ClipToBounds="True"
+                                VerticalAlignment="Bottom" Visibility="Collapsed">
+                            <TextBlock x:Name="LyricsTranslationText" Foreground="#50545A"
+                                       FontSize="11"/>
+                        </Canvas>
+                    </Grid>
                 </Grid>
 
                 <!-- Playback controls -->
                 <StackPanel Grid.Column="2"
                             Orientation="Horizontal"
                             VerticalAlignment="Center">
+
+                    <Button x:Name="LyricsButton"
+                            Style="{StaticResource TransportButton}"
+                            Width="24"
+                            Content="♫"
+                            FontSize="12"
+                            AutomationProperties.Name="Toggle lyrics"
+                            Click="OnLyricsClick"/>
 
                     <Button x:Name="PreviousButton"
                             Style="{StaticResource TransportButton}"

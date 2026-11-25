@@ -1,5 +1,6 @@
 using Windows.Media.Control;
 using Windows.Storage.Streams;
+using System.Diagnostics;
 
 namespace TaskbarMusicControls.Services;
 
@@ -29,6 +30,12 @@ internal sealed class MediaSessionService
     }
 
     public Task SkipPreviousAsync() => RunCommandAsync(session => session.TrySkipPreviousAsync());
+
+    public Task RefreshTimelineNowAsync()
+    {
+        var session = _session;
+        return session is null ? Task.CompletedTask : RefreshTimelineAsync(session);
+    }
 
     public Task TogglePlaybackAsync() => RunCommandAsync(session => session.TryTogglePlayPauseAsync());
 
@@ -72,6 +79,11 @@ internal sealed class MediaSessionService
         PlaybackInfoChangedEventArgs args) =>
         _ = RefreshPlaybackInfoAsync(sender);
 
+    private void OnTimelinePropertiesChanged(
+        GlobalSystemMediaTransportControlsSession sender,
+        TimelinePropertiesChangedEventArgs args) =>
+        _ = RefreshTimelineAsync(sender);
+
     private async Task RefreshCurrentSessionAsync()
     {
         await _refreshLock.WaitAsync();
@@ -84,6 +96,7 @@ internal sealed class MediaSessionService
                 {
                     _session.MediaPropertiesChanged -= OnMediaPropertiesChanged;
                     _session.PlaybackInfoChanged -= OnPlaybackInfoChanged;
+                    _session.TimelinePropertiesChanged -= OnTimelinePropertiesChanged;
                 }
 
                 _session = nextSession;
@@ -91,6 +104,7 @@ internal sealed class MediaSessionService
                 {
                     _session.MediaPropertiesChanged += OnMediaPropertiesChanged;
                     _session.PlaybackInfoChanged += OnPlaybackInfoChanged;
+                    _session.TimelinePropertiesChanged += OnTimelinePropertiesChanged;
                 }
             }
 
@@ -117,6 +131,7 @@ internal sealed class MediaSessionService
 
             var properties = await changedSession.TryGetMediaPropertiesAsync();
             var artwork = await ReadArtworkAsync(properties.Thumbnail);
+            var timeline = changedSession.GetTimelineProperties();
             if (!ReferenceEquals(changedSession, _session))
                 return;
 
@@ -124,7 +139,11 @@ internal sealed class MediaSessionService
             {
                 Title = properties.Title,
                 Artist = properties.Artist,
-                ArtworkBytes = artwork
+                Album = properties.AlbumTitle,
+                ArtworkBytes = artwork,
+                Duration = timeline.EndTime,
+                Position = timeline.Position,
+                PositionUpdatedAt = Stopwatch.GetTimestamp()
             });
         }
         catch (Exception)
@@ -147,6 +166,7 @@ internal sealed class MediaSessionService
                 return;
 
             var playbackInfo = changedSession.GetPlaybackInfo();
+            var timeline = changedSession.GetTimelineProperties();
             var controls = playbackInfo.Controls;
             var isPlaying = playbackInfo.PlaybackStatus ==
                 GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
@@ -161,12 +181,41 @@ internal sealed class MediaSessionService
                 IsPlaying = isPlaying,
                 CanPlayPause = canPlayPause,
                 CanGoPrevious = controls.IsPreviousEnabled,
-                CanGoNext = controls.IsNextEnabled
+                CanGoNext = controls.IsNextEnabled,
+                Duration = timeline.EndTime,
+                Position = timeline.Position,
+                PositionUpdatedAt = Stopwatch.GetTimestamp()
             });
         }
         catch (Exception)
         {
             // Keep the last good playback state when a player temporarily stops responding.
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
+    }
+
+    private async Task RefreshTimelineAsync(
+        GlobalSystemMediaTransportControlsSession changedSession)
+    {
+        await _refreshLock.WaitAsync();
+        try
+        {
+            if (!ReferenceEquals(changedSession, _session))
+                return;
+            var timeline = changedSession.GetTimelineProperties();
+            Publish(CurrentState with
+            {
+                Position = timeline.Position,
+                PositionUpdatedAt = Stopwatch.GetTimestamp(),
+                Duration = timeline.EndTime
+            });
+        }
+        catch (Exception)
+        {
+            // Timeline data is optional.
         }
         finally
         {
@@ -185,6 +234,7 @@ internal sealed class MediaSessionService
 
         var properties = await session.TryGetMediaPropertiesAsync();
         var playbackInfo = session.GetPlaybackInfo();
+        var timeline = session.GetTimelineProperties();
         var controls = playbackInfo.Controls;
         var artwork = await ReadArtworkAsync(properties.Thumbnail);
         if (!ReferenceEquals(session, _session))
@@ -202,7 +252,11 @@ internal sealed class MediaSessionService
                     ? controls.IsPauseEnabled
                     : controls.IsPlayEnabled),
             controls.IsPreviousEnabled,
-            controls.IsNextEnabled));
+            controls.IsNextEnabled,
+            properties.AlbumTitle,
+            timeline.EndTime,
+            timeline.Position,
+            Stopwatch.GetTimestamp()));
     }
 
     private static async Task<byte[]?> ReadArtworkAsync(
@@ -247,7 +301,11 @@ internal sealed record MediaSessionState(
     bool IsPlaying,
     bool CanPlayPause,
     bool CanGoPrevious,
-    bool CanGoNext)
+    bool CanGoNext,
+    string Album = "",
+    TimeSpan Duration = default,
+    TimeSpan Position = default,
+    long PositionUpdatedAt = 0)
 {
     public static MediaSessionState Empty { get; } = new(
         "No media playing",

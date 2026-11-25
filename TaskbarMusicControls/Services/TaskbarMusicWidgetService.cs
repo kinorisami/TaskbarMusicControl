@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Threading;
+using System.Diagnostics;
 using TaskbarMusicControls.Overlay;
 
 namespace TaskbarMusicControls.Services;
@@ -11,6 +12,11 @@ internal sealed class TaskbarMusicWidgetService
     private readonly TaskbarLayoutMonitor _layoutMonitor = new();
     private readonly TaskbarWindowMonitor _taskbarWindowMonitor = new();
     private readonly MediaSessionService _mediaSessionService = new();
+    private readonly LyricsService _lyricsService = new();
+    private readonly DispatcherTimer _lyricsTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(120)
+    };
     private readonly DispatcherTimer _layoutTimer = new()
     {
         Interval = TimeSpan.FromSeconds(15)
@@ -28,12 +34,18 @@ internal sealed class TaskbarMusicWidgetService
     private IntPtr _watchedTaskbar;
     private bool _layoutRefreshInProgress;
     private bool _layoutRefreshRequested;
+    private MediaSessionState _latestMediaState = MediaSessionState.Empty;
+    private LyricsDocument? _lyrics;
+    private CancellationTokenSource? _lyricsLookupCancellation;
+    private string _lyricsTrackKey = "";
+    private bool _lyricsMode;
 
     public TaskbarMusicWidgetService()
     {
         _layoutTimer.Tick += OnLayoutTimerTick;
         _layoutChangeTimer.Tick += OnLayoutChangeTimerTick;
         _nativeHandleTimer.Tick += OnNativeHandleTimerTick;
+        _lyricsTimer.Tick += OnLyricsTimerTick;
         _layoutMonitor.LayoutChanged += OnTaskbarLayoutChanged;
         _taskbarWindowMonitor.TaskbarCreated += OnTaskbarCreated;
         _mediaSessionService.StateChanged += OnMediaSessionStateChanged;
@@ -77,15 +89,14 @@ internal sealed class TaskbarMusicWidgetService
             _ = _mediaSessionService.TogglePlaybackAsync();
         overlay.NextRequested += (_, _) =>
             _ = _mediaSessionService.SkipNextAsync();
+        overlay.LyricsModeChanged += OnLyricsModeChanged;
         overlay.Closed += OnOverlayClosed;
 
         var state = _mediaSessionService.CurrentState;
+        _latestMediaState = state;
+        overlay.SetLyricsMode(_lyricsMode);
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
-        overlay.UpdatePlaybackState(
-            state.IsPlaying,
-            state.CanPlayPause,
-            state.CanGoPrevious,
-            state.CanGoNext);
+        ApplyMediaState(overlay, state);
         overlay.Show();
         overlay.PositionInAvailableArea(
             taskbarHandle,
@@ -106,14 +117,101 @@ internal sealed class TaskbarMusicWidgetService
         {
             if (!ReferenceEquals(_overlay, overlay))
                 return;
-
-            overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
-            overlay.UpdatePlaybackState(
-                state.IsPlaying,
-                state.CanPlayPause,
-                state.CanGoPrevious,
-                state.CanGoNext);
+            _latestMediaState = state;
+            ApplyMediaState(overlay, state);
         });
+    }
+
+    private void ApplyMediaState(MusicOverlayWindow overlay, MediaSessionState state)
+    {
+        var trackKey = $"{state.Artist}\u001f{state.Title}\u001f{state.Album}";
+        if (!string.Equals(trackKey, _lyricsTrackKey, StringComparison.Ordinal))
+        {
+            _lyricsTrackKey = trackKey;
+            _lyricsLookupCancellation?.Cancel();
+            _lyricsLookupCancellation?.Dispose();
+            _lyricsLookupCancellation = new CancellationTokenSource();
+            _lyrics = null;
+            overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
+            _ = FindLyricsAsync(trackKey, state, _lyricsLookupCancellation.Token);
+        }
+        else if (!ReferenceEquals(_lastArtwork, state.ArtworkBytes))
+        {
+            overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
+        }
+        _lastArtwork = state.ArtworkBytes;
+        overlay.UpdatePlaybackState(state.IsPlaying, state.CanPlayPause,
+            state.CanGoPrevious, state.CanGoNext);
+        overlay.UpdateLyrics(_lyrics, GetCurrentPosition(state));
+    }
+
+    private byte[]? _lastArtwork;
+
+    private async Task FindLyricsAsync(string trackKey, MediaSessionState state, CancellationToken token)
+    {
+        try
+        {
+            var result = await _lyricsService.FindAsync(
+                new LyricsRequest(state.Title, state.Artist, state.Album, state.Duration), token);
+            if (token.IsCancellationRequested) return;
+            var dispatcher = Application.Current.Dispatcher;
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (token.IsCancellationRequested || trackKey != _lyricsTrackKey || _overlay is not { } overlay)
+                    return;
+                _lyrics = result;
+                if (_lyricsMode && _lyrics?.IsTimed == true) _lyricsTimer.Start();
+                overlay.UpdateLyrics(_lyrics, GetCurrentPosition(_latestMediaState));
+            });
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception) { /* A failed lyric lookup leaves the metadata visible. */ }
+    }
+
+    private static TimeSpan GetCurrentPosition(MediaSessionState state)
+    {
+        var position = state.Position;
+        if (state.IsPlaying && state.PositionUpdatedAt != 0)
+            position += Stopwatch.GetElapsedTime(state.PositionUpdatedAt);
+        if (state.Duration > TimeSpan.Zero && position > state.Duration)
+            position = state.Duration;
+        return position < TimeSpan.Zero ? TimeSpan.Zero : position;
+    }
+
+    private void OnLyricsModeChanged(object? sender, bool enabled)
+    {
+        _lyricsMode = enabled;
+        if (enabled)
+        {
+            _lyricsTimer.Stop();
+            _ = RefreshPositionWhenLyricsOpenedAsync();
+        }
+        else
+        {
+            _lyricsTimer.Stop();
+        }
+        if (!enabled && _overlay is { } overlay)
+            overlay.UpdateLyrics(_lyrics, GetCurrentPosition(_latestMediaState));
+    }
+
+    private async Task RefreshPositionWhenLyricsOpenedAsync()
+    {
+        await _mediaSessionService.RefreshTimelineNowAsync();
+        var state = _mediaSessionService.CurrentState;
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            _latestMediaState = state;
+            if (_overlay is { } overlay)
+                overlay.UpdateLyrics(_lyrics, GetCurrentPosition(state));
+            if (_lyricsMode && _lyrics?.IsTimed == true)
+                _lyricsTimer.Start();
+        });
+    }
+
+    private void OnLyricsTimerTick(object? sender, EventArgs e)
+    {
+        if (_overlay is { } overlay)
+            overlay.UpdateLyrics(_lyrics, GetCurrentPosition(_latestMediaState));
     }
 
     private void OnLayoutTimerTick(object? sender, EventArgs e)
@@ -255,6 +353,9 @@ internal sealed class TaskbarMusicWidgetService
         _layoutTimer.Stop();
         _layoutChangeTimer.Stop();
         _nativeHandleTimer.Stop();
+        _lyricsTimer.Stop();
+        _lyricsLookupCancellation?.Cancel();
+        _lyricsLookupCancellation?.Dispose();
         _layoutMonitor.Dispose();
         _taskbarWindowMonitor.Dispose();
         Application.Current.Shutdown();

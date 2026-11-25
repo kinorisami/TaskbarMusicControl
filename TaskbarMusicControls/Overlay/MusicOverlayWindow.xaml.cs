@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using TaskbarMusicControls.Services;
 
 namespace TaskbarMusicControls.Overlay;
 
@@ -31,10 +32,19 @@ public partial class MusicOverlayWindow : Window
     private nint _nativeHandle;
     private string _currentTitle = "No media playing";
     private string _currentArtist = "Start playback in a media app";
+    private bool _lyricsMode;
+    private LyricsDocument? _lyrics;
+    private string _renderedOriginal = "";
+    private string? _renderedTranslation;
+    private TimeSpan? _renderedOriginalTime;
+    private TimeSpan? _renderedTranslationTime;
+    private TimeSpan? _originalTimeRemaining;
+    private TimeSpan? _translationTimeRemaining;
 
     public event EventHandler? PreviousRequested;
     public event EventHandler? ToggleRequested;
     public event EventHandler? NextRequested;
+    public event Action<object?, bool>? LyricsModeChanged;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -104,6 +114,56 @@ public partial class MusicOverlayWindow : Window
         ToggleButton.SetValue(
             AutomationProperties.NameProperty,
             isPlaying ? "Pause" : "Play");
+    }
+
+    internal void UpdateLyrics(LyricsDocument? lyrics, TimeSpan position)
+    {
+        _lyrics = lyrics;
+        var lyricPosition = position + TimeSpan.FromSeconds(0);
+        var current = lyrics?.At(lyricPosition);
+        var originalFrame = current?.Original;
+        var translationFrame = current?.Translation;
+        var original = originalFrame?.Text;
+        var translation = translationFrame?.Text;
+        var hasTranslation = !string.IsNullOrWhiteSpace(translation);
+        var hasLine = _lyricsMode && !string.IsNullOrWhiteSpace(original);
+        LyricsPanel.Visibility = hasLine ? Visibility.Visible : Visibility.Collapsed;
+        MetadataTextPanel.Visibility = hasLine ? Visibility.Collapsed : Visibility.Visible;
+        if (!hasLine) return;
+
+        var originalChanged = original != _renderedOriginal || originalFrame!.Time != _renderedOriginalTime;
+        var translationChanged = translation != _renderedTranslation || translationFrame?.Time != _renderedTranslationTime;
+        var translationVisibilityChanged = hasTranslation != (_renderedTranslation is not null);
+        if (!originalChanged && !translationChanged) return;
+        _renderedOriginal = original!;
+        _renderedTranslation = hasTranslation ? translation : null;
+        _renderedOriginalTime = originalFrame!.Time;
+        _renderedTranslationTime = translationFrame?.Time;
+        _originalTimeRemaining = originalFrame.NextTime is { } originalNext
+            ? originalNext - lyricPosition
+            : null;
+        _translationTimeRemaining = translationFrame?.NextTime is { } translationNext
+            ? translationNext - lyricPosition
+            : null;
+        LyricsOriginalText.Text = _renderedOriginal;
+        LyricsTranslationText.Text = _renderedTranslation ?? "";
+        LyricsOriginalCanvas.VerticalAlignment = hasTranslation
+            ? VerticalAlignment.Top
+            : VerticalAlignment.Center;
+        LyricsTranslationCanvas.Visibility = _renderedTranslation is null
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        ScheduleLyricsMarqueeRefresh(
+            originalChanged || translationVisibilityChanged,
+            translationChanged || translationVisibilityChanged);
+    }
+
+    internal void SetLyricsMode(bool enabled)
+    {
+        _lyricsMode = enabled;
+        LyricsButton.Foreground = enabled
+            ? new SolidColorBrush(Color.FromRgb(22, 124, 105))
+            : new SolidColorBrush(Color.FromRgb(48, 52, 58));
     }
 
     public bool PositionInAvailableArea(
@@ -194,17 +254,19 @@ public partial class MusicOverlayWindow : Window
             MetadataColumn.Width = new GridLength(0);
             ControlsColumn.Width = new GridLength(1, GridUnitType.Star);
 
-            var buttonWidth = Math.Max(30, (width - 8) / 3);
+            var buttonWidth = Math.Max(24, (width - 8) / 4);
+            LyricsButton.Width = buttonWidth;
             PreviousButton.Width = buttonWidth;
             ToggleButton.Width = buttonWidth;
             NextButton.Width = buttonWidth;
             return;
         }
 
+        LyricsButton.Width = 24;
         PreviousButton.Width = 22;
         ToggleButton.Width = 30;
         NextButton.Width = 22;
-        ControlsColumn.Width = new GridLength(88);
+        ControlsColumn.Width = new GridLength(112);
         MetadataPanel.Visibility = Visibility.Visible;
         MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
 
@@ -261,6 +323,66 @@ public partial class MusicOverlayWindow : Window
             TitleTranslation, _currentTitle);
         UpdateMarquee(ArtistCanvas, ArtistPrimary, ArtistSpacer, ArtistSecondary,
             ArtistTranslation, _currentArtist);
+        RefreshLyricsMarquees();
+    }
+
+    private void ScheduleLyricsMarqueeRefresh(bool refreshOriginal, bool refreshTranslation) => Dispatcher.BeginInvoke(
+        System.Windows.Threading.DispatcherPriority.Loaded,
+        new Action(() => RefreshLyricsMarquees(refreshOriginal, refreshTranslation)));
+
+    private void RefreshLyricsMarquees(bool refreshOriginal = true, bool refreshTranslation = true)
+    {
+        if (!IsLoaded || LyricsPanel.Visibility != Visibility.Visible) return;
+        if (refreshOriginal)
+            UpdateLyricsMarquee(LyricsOriginalCanvas, LyricsOriginalText, _renderedOriginal,
+                _renderedTranslation is null, _originalTimeRemaining);
+        if (refreshTranslation && _renderedTranslation is not null)
+            UpdateLyricsMarquee(LyricsTranslationCanvas, LyricsTranslationText,
+                _renderedTranslation, false, _translationTimeRemaining);
+    }
+
+    private static void UpdateLyricsMarquee(
+        Canvas canvas,
+        TextBlock textBlock,
+        string text,
+        bool center,
+        TimeSpan? timeUntilNext)
+    {
+        var transform = textBlock.RenderTransform as TranslateTransform;
+        if (transform is null)
+        {
+            transform = new TranslateTransform();
+            textBlock.RenderTransform = transform;
+        }
+        transform.BeginAnimation(TranslateTransform.XProperty, null);
+        transform.X = 0;
+        textBlock.ClearValue(WidthProperty);
+        var textWidth = MeasureTextWidth(textBlock, text);
+        var viewportWidth = canvas.ActualWidth;
+        if (viewportWidth <= 0) return;
+        Canvas.SetLeft(textBlock, center && textWidth < viewportWidth
+            ? Math.Max(0, (viewportWidth - textWidth) / 2)
+            : 0);
+        if (textWidth <= viewportWidth + 1) return;
+        textBlock.Width = textWidth;
+        var naturalDuration = textWidth / 70.0;
+        var delay = timeUntilNext is { } remainingTime
+            ? Math.Min(0.12, Math.Max(0, remainingTime.TotalSeconds * 0.1))
+            : 0.8;
+        var duration = timeUntilNext is { } remaining
+            ? Math.Min(naturalDuration, Math.Max(0.12, remaining.TotalSeconds - delay - 0.03))
+            : naturalDuration;
+        var animation = new DoubleAnimation
+        {
+            From = 0,
+            To = -(textWidth - viewportWidth + 24),
+            Duration = TimeSpan.FromSeconds(Math.Max(0.2, duration)),
+            BeginTime = TimeSpan.FromSeconds(delay),
+            RepeatBehavior = timeUntilNext.HasValue
+                ? new RepeatBehavior(1)
+                : RepeatBehavior.Forever
+        };
+        transform.BeginAnimation(TranslateTransform.XProperty, animation);
     }
 
     private static void UpdateMarquee(
@@ -334,6 +456,12 @@ public partial class MusicOverlayWindow : Window
 
     private void OnNextClick(object sender, RoutedEventArgs e) =>
         NextRequested?.Invoke(this, EventArgs.Empty);
+
+    private void OnLyricsClick(object sender, RoutedEventArgs e)
+    {
+        SetLyricsMode(!_lyricsMode);
+        LyricsModeChanged?.Invoke(this, _lyricsMode);
+    }
 
     private void OnRootMouseRightButtonUp(
         object sender,
