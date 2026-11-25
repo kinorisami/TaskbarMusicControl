@@ -8,7 +8,9 @@
         ShowActivated="False"
         AllowsTransparency="True"
         Background="Transparent"
-        Focusable="False">
+        Focusable="False"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True">
 
     <Window.Resources>
         <Style x:Key="TransportButton" TargetType="Button">
@@ -97,7 +99,7 @@
             Padding="0">
 
         <Border.ContextMenu>
-            <ContextMenu>
+            <ContextMenu Closed="OnContextMenuClosed">
                 <MenuItem Header="Full layout"
                           Tag="FullDetails"
                           IsCheckable="True"
@@ -131,6 +133,7 @@
                     <MenuItem Header="Delay 2 s" Tag="2000" Click="OnLyricsOffsetClick"/>
                     <MenuItem Header="Delay 6 s" Tag="6000" Click="OnLyricsOffsetClick"/>
                 </MenuItem>
+                <MenuItem x:Name="TaskbarMenu" Header="Taskbar"/>
                 <Separator/>
                 <MenuItem Header="Exit Taskbar Music Widget"
                           Click="OnExitClick"/>

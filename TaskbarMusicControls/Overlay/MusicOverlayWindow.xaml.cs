@@ -46,6 +46,8 @@ public partial class MusicOverlayWindow : Window
     private bool _hoverPlaybackOnlyMode;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
     private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
+    private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();
+    private string _selectedTaskbarDeviceId = "";
     private double _lastAvailableWidth = DefaultWidth;
     private double _responsiveLayoutWidth = -1;
     private LyricsDocument? _lyrics;
@@ -63,6 +65,7 @@ public partial class MusicOverlayWindow : Window
     internal event Action<object?, WidgetDisplayMode>? DisplayModeChanged;
     internal event Action<object?, LyricsSourcePreference>? LyricsSourceChanged;
     internal event Action<object?, TimeSpan>? LyricsOffsetChanged;
+    internal event Action<object?, string>? TaskbarSelectionChanged;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -191,7 +194,7 @@ public partial class MusicOverlayWindow : Window
     internal void SetDisplayMode(WidgetDisplayMode mode)
     {
         _displayMode = mode;
-        var width = GetWidthForMode(_lastAvailableWidth);
+        var width = GetEffectiveWidth(_lastAvailableWidth);
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
         ApplyResponsiveLayout(width);
@@ -210,7 +213,7 @@ public partial class MusicOverlayWindow : Window
         var dpi = GetDpiScale(taskbarHandle);
         var availableWidth = availableBounds.Width / dpi.DpiScaleX;
         _lastAvailableWidth = availableWidth;
-        var width = GetWidthForMode(availableWidth);
+        var width = GetEffectiveWidth(availableWidth);
         if (width < MinimumWidth)
             return false;
 
@@ -253,37 +256,10 @@ public partial class MusicOverlayWindow : Window
         return true;
     }
 
-    public bool IsWithinAvailableArea(
-        nint taskbarHandle,
-        Rect taskbarBounds,
-        Rect availableBounds)
-    {
-        _taskbarHandle = taskbarHandle;
-        if (!IsVisible || _parentTaskbarHandle != taskbarHandle ||
-            availableBounds.IsEmpty || taskbarBounds.IsEmpty)
-            return false;
-
-        var dpi = GetDpiScale(taskbarHandle);
-        var left = Left * dpi.DpiScaleX;
-        var top = Top * dpi.DpiScaleY;
-        var right = left + Width * dpi.DpiScaleX;
-        var bottom = top + Height * dpi.DpiScaleY;
-        const double tolerance = 2;
-
-        return left >= availableBounds.Left - tolerance &&
-               Math.Abs(right - availableBounds.Right) <= tolerance &&
-               top >= taskbarBounds.Top - tolerance &&
-               bottom <= taskbarBounds.Bottom + tolerance;
-    }
-
     private void ApplyResponsiveLayout(double width)
     {
         _responsiveLayoutWidth = width;
-        var effectiveMode = _displayMode;
-        if (width < 300 && effectiveMode == WidgetDisplayMode.FullDetails)
-            effectiveMode = WidgetDisplayMode.CoverAndControls;
-        if (width < TransportLayoutWidth)
-            effectiveMode = WidgetDisplayMode.CoverOnly;
+        var effectiveMode = GetEffectiveMode(width);
 
         if (effectiveMode == WidgetDisplayMode.CoverOnly)
         {
@@ -325,9 +301,21 @@ public partial class MusicOverlayWindow : Window
         ScheduleMarqueeRefresh();
     }
 
-    private double GetWidthForMode(double availableWidth)
+    private WidgetDisplayMode GetEffectiveMode(double availableWidth)
     {
-        var preferred = _displayMode switch
+        var mode = _displayMode;
+        // If the available width cannot fit the full layout at its natural size,
+        // drop straight to cover-and-controls instead of squeezing the full layout.
+        if (mode == WidgetDisplayMode.FullDetails && availableWidth < DefaultWidth)
+            mode = WidgetDisplayMode.CoverAndControls;
+        if (availableWidth < TransportLayoutWidth)
+            mode = WidgetDisplayMode.CoverOnly;
+        return mode;
+    }
+
+    private double GetEffectiveWidth(double availableWidth)
+    {
+        var preferred = GetEffectiveMode(availableWidth) switch
         {
             WidgetDisplayMode.CoverOnly => MinimumWidth,
             WidgetDisplayMode.CoverAndControls => TransportLayoutWidth,
@@ -404,6 +392,87 @@ public partial class MusicOverlayWindow : Window
         LyricsOffsetChanged?.Invoke(this, offset);
     }
 
+    internal void SetTaskbarOptions(
+        IReadOnlyList<TaskbarOption> options,
+        string selectedDeviceId)
+    {
+        var optionsChanged = !TaskbarOptionsEqual(_taskbarOptions, options);
+        _taskbarOptions = options;
+        _selectedTaskbarDeviceId = selectedDeviceId;
+        if (optionsChanged)
+            RebuildTaskbarMenu();
+        else
+            UpdateTaskbarMenuChecks();
+    }
+
+    internal void SetTaskbarSelection(string selectedDeviceId)
+    {
+        _selectedTaskbarDeviceId = selectedDeviceId;
+        UpdateTaskbarMenuChecks();
+    }
+
+    private void RebuildTaskbarMenu()
+    {
+        if (TaskbarMenu is null)
+            return;
+
+        TaskbarMenu.Visibility = _taskbarOptions.Count > 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        TaskbarMenu.Items.Clear();
+        foreach (var option in _taskbarOptions)
+        {
+            var item = new MenuItem
+            {
+                Header = option.IsPrimary
+                    ? $"{option.DisplayName} (primary)"
+                    : option.DisplayName,
+                Tag = option.DeviceId,
+                IsCheckable = true,
+                IsChecked = string.Equals(option.DeviceId, _selectedTaskbarDeviceId,
+                    StringComparison.Ordinal)
+            };
+            item.Click += OnTaskbarClick;
+            TaskbarMenu.Items.Add(item);
+        }
+    }
+
+    private void OnTaskbarClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: string deviceId })
+            return;
+
+        _selectedTaskbarDeviceId = deviceId;
+        UpdateTaskbarMenuChecks();
+        TaskbarSelectionChanged?.Invoke(this, deviceId);
+    }
+
+    private void UpdateTaskbarMenuChecks()
+    {
+        foreach (var item in TaskbarMenu?.Items.OfType<MenuItem>() ?? [])
+        {
+            item.IsChecked = string.Equals(item.Tag?.ToString(), _selectedTaskbarDeviceId,
+                StringComparison.Ordinal);
+        }
+    }
+
+    private static bool TaskbarOptionsEqual(
+        IReadOnlyList<TaskbarOption> left,
+        IReadOnlyList<TaskbarOption> right)
+    {
+        if (left.Count != right.Count)
+            return false;
+
+        for (var i = 0; i < left.Count; i++)
+        {
+            if (!string.Equals(left[i].DeviceId, right[i].DeviceId, StringComparison.Ordinal) ||
+                !string.Equals(left[i].DisplayName, right[i].DisplayName, StringComparison.Ordinal) ||
+                left[i].IsPrimary != right[i].IsPrimary)
+                return false;
+        }
+        return true;
+    }
+
     private void SetHoverPlaybackOnlyMode(bool enabled)
     {
         _hoverPlaybackOnlyMode = enabled;
@@ -417,12 +486,28 @@ public partial class MusicOverlayWindow : Window
 
     private void OnArtworkMouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        if (_hoverPlaybackOnlyMode)
+        if (_hoverPlaybackOnlyMode && !IsContextMenuOpen)
             HoverPlaybackButton.Visibility = Visibility.Visible;
     }
 
-    private void OnArtworkMouseLeave(object sender, System.Windows.Input.MouseEventArgs e) =>
-        HoverPlaybackButton.Visibility = Visibility.Collapsed;
+    private void OnArtworkMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        // Opening the context menu steals mouse capture and raises MouseLeave even
+        // though the cursor is still over the artwork. Keep the hover button stable
+        // while the menu is open instead of toggling it for one frame.
+        if (!IsContextMenuOpen)
+            HoverPlaybackButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnContextMenuClosed(object sender, RoutedEventArgs e)
+    {
+        if (_hoverPlaybackOnlyMode)
+            HoverPlaybackButton.Visibility = Artwork.IsMouseOver
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+    }
+
+    private bool IsContextMenuOpen => RootBorder.ContextMenu?.IsOpen == true;
 
     private void OnHoverPlaybackClick(object sender, RoutedEventArgs e) =>
         ToggleRequested?.Invoke(this, EventArgs.Empty);

@@ -90,6 +90,7 @@ internal sealed class MediaSessionService
 
     private async Task RefreshCurrentSessionAsync()
     {
+        GlobalSystemMediaTransportControlsSession? session;
         await _refreshLock.WaitAsync();
         try
         {
@@ -114,21 +115,34 @@ internal sealed class MediaSessionService
                 }
             }
 
-            await PublishSessionStateAsync(_session);
+            session = _session;
         }
         catch (Exception)
         {
             Publish(MediaSessionState.Empty);
+            return;
         }
         finally
         {
             _refreshLock.Release();
+        }
+
+        try
+        {
+            await PublishSessionStateAsync(session);
+        }
+        catch (Exception)
+        {
+            Publish(MediaSessionState.Empty);
         }
     }
 
     private async Task RefreshMediaPropertiesAsync(
         GlobalSystemMediaTransportControlsSession changedSession)
     {
+        string trackIdentity;
+        IRandomAccessStreamReference? thumbnail;
+
         await _refreshLock.WaitAsync();
         try
         {
@@ -140,30 +154,35 @@ internal sealed class MediaSessionService
             if (!ReferenceEquals(changedSession, _session))
                 return;
 
+            trackIdentity = BuildTrackIdentity(properties.Title, properties.Artist, properties.AlbumTitle);
+            var trackChanged = trackIdentity != _clockTrackIdentity;
             ResetClockIfTrackChanged(properties.Title, properties.Artist, properties.AlbumTitle);
             _playbackClock.Synchronize(timeline, CurrentState.IsPlaying, timeline.EndTime,
                 "media-properties");
-            var artwork = await ReadArtworkAsync(properties.Thumbnail);
-            if (!ReferenceEquals(changedSession, _session))
-                return;
 
             Publish(CurrentState with
             {
                 Title = properties.Title,
                 Artist = properties.Artist,
                 Album = properties.AlbumTitle,
-                ArtworkBytes = artwork,
+                ArtworkBytes = trackChanged ? null : CurrentState.ArtworkBytes,
                 Duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : CurrentState.Duration
             });
+
+            thumbnail = properties.Thumbnail;
         }
         catch (Exception)
         {
             // Keep the last good metadata when a player temporarily stops responding.
+            return;
         }
         finally
         {
             _refreshLock.Release();
         }
+
+        var artwork = await ReadArtworkAsync(thumbnail);
+        await PublishArtworkIfCurrentAsync(changedSession, trackIdentity, artwork);
     }
 
     private async Task RefreshPlaybackInfoAsync(
@@ -240,7 +259,7 @@ internal sealed class MediaSessionService
     {
         if (session is null)
         {
-            Publish(MediaSessionState.Empty);
+            await PublishEmptySessionIfCurrentAsync();
             return;
         }
 
@@ -249,28 +268,79 @@ internal sealed class MediaSessionService
         var timeline = session.GetTimelineProperties();
         var isPlaying = playbackInfo.PlaybackStatus ==
             GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
-        ResetClockIfTrackChanged(properties.Title, properties.Artist, properties.AlbumTitle);
-        _playbackClock.Synchronize(timeline, isPlaying, timeline.EndTime, "session-start");
         var controls = playbackInfo.Controls;
-        // The position anchor has already been captured; artwork loading cannot delay it.
-        var artwork = await ReadArtworkAsync(properties.Thumbnail);
-        if (!ReferenceEquals(session, _session))
-            return;
+        var title = properties.Title;
+        var artist = properties.Artist;
+        var album = properties.AlbumTitle;
+        var trackIdentity = BuildTrackIdentity(title, artist, album);
+        var thumbnail = properties.Thumbnail;
 
-        Publish(new MediaSessionState(
-            properties.Title,
-            properties.Artist,
-            artwork,
-            isPlaying,
-            controls.IsPlayPauseToggleEnabled ||
-                (playbackInfo.PlaybackStatus ==
-                    GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
-                    ? controls.IsPauseEnabled
-                    : controls.IsPlayEnabled),
-            controls.IsPreviousEnabled,
-            controls.IsNextEnabled,
-            properties.AlbumTitle,
-            timeline.EndTime));
+        await _refreshLock.WaitAsync();
+        try
+        {
+            if (!ReferenceEquals(session, _session))
+                return;
+
+            ResetClockIfTrackChanged(title, artist, album);
+            _playbackClock.Synchronize(timeline, isPlaying, timeline.EndTime, "session-start");
+            Publish(new MediaSessionState(
+                title,
+                artist,
+                null,
+                isPlaying,
+                controls.IsPlayPauseToggleEnabled ||
+                    (playbackInfo.PlaybackStatus ==
+                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
+                        ? controls.IsPauseEnabled
+                        : controls.IsPlayEnabled),
+                controls.IsPreviousEnabled,
+                controls.IsNextEnabled,
+                album,
+                timeline.EndTime));
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
+
+        // Artwork is loaded after committing metadata and the playback anchor so slow
+        // thumbnail reads never hold up playback, timeline, or session-switch refreshes.
+        var artwork = await ReadArtworkAsync(thumbnail);
+        await PublishArtworkIfCurrentAsync(session, trackIdentity, artwork);
+    }
+
+    private async Task PublishEmptySessionIfCurrentAsync()
+    {
+        await _refreshLock.WaitAsync();
+        try
+        {
+            if (_session is null)
+                Publish(MediaSessionState.Empty);
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
+    }
+
+    private async Task PublishArtworkIfCurrentAsync(
+        GlobalSystemMediaTransportControlsSession session,
+        string trackIdentity,
+        byte[]? artwork)
+    {
+        await _refreshLock.WaitAsync();
+        try
+        {
+            if (!ReferenceEquals(session, _session) ||
+                _clockTrackIdentity != trackIdentity)
+                return;
+
+            Publish(CurrentState with { ArtworkBytes = artwork });
+        }
+        finally
+        {
+            _refreshLock.Release();
+        }
     }
 
     private static async Task<byte[]?> ReadArtworkAsync(
@@ -309,12 +379,15 @@ internal sealed class MediaSessionService
 
     private void ResetClockIfTrackChanged(string title, string artist, string album)
     {
-        var identity = $"{artist}\u001f{title}\u001f{album}";
+        var identity = BuildTrackIdentity(title, artist, album);
         if (identity == _clockTrackIdentity)
             return;
         _clockTrackIdentity = identity;
         _playbackClock.Reset("track-changed");
     }
+
+    private static string BuildTrackIdentity(string title, string artist, string album) =>
+        $"{artist}\u001f{title}\u001f{album}";
 
 }
 

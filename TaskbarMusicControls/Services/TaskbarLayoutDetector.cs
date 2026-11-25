@@ -18,7 +18,6 @@ internal sealed class TaskbarLayoutDetector
             {
                 TreeScope = TreeScope.Element
             };
-            cache.Add(AutomationElement.AutomationIdProperty);
             cache.Add(AutomationElement.ClassNameProperty);
             cache.Add(AutomationElement.BoundingRectangleProperty);
 
@@ -45,18 +44,32 @@ internal sealed class TaskbarLayoutDetector
 
     private static TaskbarLayout? BuildLayout(ScanState state)
     {
-        var appsRight = state.AppButtonsBounds.Width <= 0
-            ? state.StartButtonBounds.Right
-            : state.AppButtonsBounds.Right;
-        var trayLeft = state.SystemTrayBounds.Width <= 0
-            ? state.TaskbarBounds.Right
-            : state.SystemTrayBounds.Left;
-
         if (state.TaskbarBounds.IsEmpty ||
             state.TaskbarBounds.Width <= 0 ||
-            state.TaskbarBounds.Height <= 0 ||
-            trayLeft <= appsRight)
+            state.TaskbarBounds.Height <= 0)
+        {
+            TaskbarLayoutDiagnostics.Write("taskbar bounds are missing or invalid");
             return null;
+        }
+        if (state.AppButtonsBounds.Width <= 0)
+        {
+            TaskbarLayoutDiagnostics.Write("taskbar application buttons were not found");
+            return null;
+        }
+        if (state.SystemTrayBounds.Width <= 0)
+        {
+            TaskbarLayoutDiagnostics.Write("system tray was not found");
+            return null;
+        }
+
+        var appsRight = state.AppButtonsBounds.Right;
+        var trayLeft = state.SystemTrayBounds.Left;
+        if (trayLeft <= appsRight)
+        {
+            TaskbarLayoutDiagnostics.Write(
+                $"available area is invalid: appsRight={appsRight:F0} trayLeft={trayLeft:F0}");
+            return null;
+        }
 
         var available = new Rect(
             appsRight,
@@ -79,9 +92,6 @@ internal sealed class TaskbarLayoutDetector
         try
         {
             state.NodeCount++;
-            var automationId = GetCached<string>(
-                element,
-                AutomationElement.AutomationIdProperty);
             var className = GetCached<string>(
                 element,
                 AutomationElement.ClassNameProperty) ?? string.Empty;
@@ -89,11 +99,9 @@ internal sealed class TaskbarLayoutDetector
                 element,
                 AutomationElement.BoundingRectangleProperty);
 
-            if (automationId == "StartButton")
-                state.StartButtonBounds = bounds;
-            else if (className.StartsWith(
-                         "Taskbar.TaskListButton",
-                         StringComparison.Ordinal))
+            if (className.StartsWith(
+                    "Taskbar.TaskListButton",
+                    StringComparison.Ordinal))
                 state.AppButtonsBounds = Union(state.AppButtonsBounds, bounds);
             else if (className.StartsWith("SystemTray.", StringComparison.Ordinal) ||
                      className == "TrayNotifyWnd")
@@ -142,7 +150,6 @@ internal sealed class TaskbarLayoutDetector
     private sealed class ScanState(Rect taskbarBounds)
     {
         public Rect TaskbarBounds { get; } = taskbarBounds;
-        public Rect StartButtonBounds { get; set; }
         public Rect AppButtonsBounds { get; set; }
         public Rect SystemTrayBounds { get; set; }
         public int NodeCount { get; set; }
