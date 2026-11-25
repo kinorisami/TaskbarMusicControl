@@ -29,6 +29,8 @@ public partial class MusicOverlayWindow : Window
     private const long WsClipSiblings = 0x04000000L;
     private const long WsExToolWindow = 0x00000080L;
     private const long WsExNoActivate = 0x08000000L;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
     private const uint SwpNoActivate = 0x0010;
     private static readonly nint HwndTop = 0;
     private const double DefaultWidth = 350;
@@ -553,6 +555,20 @@ public partial class MusicOverlayWindow : Window
         return true;
     }
 
+    internal void RaiseToTop()
+    {
+        var handle = _nativeHandle != 0 ? _nativeHandle : new WindowInteropHelper(this).Handle;
+        if (handle != 0 && IsWindow(handle))
+            SetWindowPos(
+                handle,
+                HwndTop,
+                0,
+                0,
+                0,
+                0,
+                SwpNoActivate | SwpNoMove | SwpNoSize);
+    }
+
     private void OnMetadataSizeChanged(object sender, SizeChangedEventArgs e) =>
         ScheduleMarqueeRefresh();
 
@@ -735,7 +751,15 @@ public partial class MusicOverlayWindow : Window
         LyricsModeChanged?.Invoke(this, _lyricsMode);
     }
 
-    private void OnExitClick(object sender, RoutedEventArgs e) => Close();
+    private void OnExitClick(object sender, RoutedEventArgs e)
+    {
+        // Close the context menu before closing the window; otherwise the popup
+        // can stay visible for a few seconds while WPF tears down the app.
+        if (RootBorder.ContextMenu is { IsOpen: true } menu)
+            menu.IsOpen = false;
+
+        Close();
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect(int left, int top, int right, int bottom)
