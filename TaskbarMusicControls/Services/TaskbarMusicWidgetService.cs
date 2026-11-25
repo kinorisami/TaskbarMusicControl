@@ -136,6 +136,9 @@ internal sealed class TaskbarMusicWidgetService
             taskbarHandle,
             layout.TaskbarBounds,
             layout.AvailableBounds);
+        overlay.Dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Loaded,
+            new Action(overlay.RaiseToTop));
 
         _positionedTaskbar = taskbarHandle;
         _positionedTaskbarBounds = layout.TaskbarBounds;
@@ -556,8 +559,6 @@ internal sealed class TaskbarMusicWidgetService
         _timelineSyncTimer.Stop();
         _lyricsLookupCancellation?.Cancel();
         _lyricsLookupCancellation?.Dispose();
-        _layoutMonitor.Dispose();
-        _taskbarWindowMonitor.Dispose();
         Application.Current.Shutdown();
     }
 
