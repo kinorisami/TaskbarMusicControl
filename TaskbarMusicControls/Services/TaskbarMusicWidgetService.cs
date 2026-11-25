@@ -40,6 +40,7 @@ internal sealed class TaskbarMusicWidgetService
     private string _lyricsTrackKey = "";
     private bool _lyricsMode;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
+    private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
 
     public TaskbarMusicWidgetService()
     {
@@ -55,6 +56,7 @@ internal sealed class TaskbarMusicWidgetService
     public async Task StartAsync()
     {
         _displayMode = WidgetDisplayModeStore.Load();
+        _lyricsSourcePreference = LyricsSourceStore.Load();
         _layoutTimer.Start();
         await _mediaSessionService.InitializeAsync();
 
@@ -93,11 +95,13 @@ internal sealed class TaskbarMusicWidgetService
         overlay.NextRequested += (_, _) =>
             _ = _mediaSessionService.SkipNextAsync();
         overlay.LyricsModeChanged += OnLyricsModeChanged;
+        overlay.LyricsSourceChanged += OnLyricsSourceChanged;
         overlay.DisplayModeChanged += OnDisplayModeChanged;
         overlay.Closed += OnOverlayClosed;
 
         var state = _mediaSessionService.CurrentState;
         _latestMediaState = state;
+        overlay.SetLyricsSource(_lyricsSourcePreference);
         overlay.SetLyricsMode(_lyricsMode);
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
         ApplyMediaState(overlay, state);
@@ -116,6 +120,17 @@ internal sealed class TaskbarMusicWidgetService
         _displayMode = mode;
         WidgetDisplayModeStore.Save(mode);
         ScheduleLayoutRefresh();
+    }
+
+    private void OnLyricsSourceChanged(object? sender, LyricsSourcePreference preference)
+    {
+        if (_lyricsSourcePreference == preference)
+            return;
+
+        _lyricsSourcePreference = preference;
+        LyricsSourceStore.Save(preference);
+        if (_overlay is not null && _latestMediaState.Title != "No media playing")
+            StartLyricsLookup(_latestMediaState);
     }
 
     private void OnMediaSessionStateChanged(MediaSessionState state)
@@ -139,12 +154,9 @@ internal sealed class TaskbarMusicWidgetService
         if (!string.Equals(trackKey, _lyricsTrackKey, StringComparison.Ordinal))
         {
             _lyricsTrackKey = trackKey;
-            _lyricsLookupCancellation?.Cancel();
-            _lyricsLookupCancellation?.Dispose();
-            _lyricsLookupCancellation = new CancellationTokenSource();
             _lyrics = null;
             overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
-            _ = FindLyricsAsync(trackKey, state, _lyricsLookupCancellation.Token);
+            StartLyricsLookup(state);
         }
         else if (!ReferenceEquals(_lastArtwork, state.ArtworkBytes))
         {
@@ -156,14 +168,31 @@ internal sealed class TaskbarMusicWidgetService
         overlay.UpdateLyrics(_lyrics, GetCurrentPosition(state));
     }
 
+    private void StartLyricsLookup(MediaSessionState state)
+    {
+        _lyricsLookupCancellation?.Cancel();
+        _lyricsLookupCancellation?.Dispose();
+        _lyricsLookupCancellation = new CancellationTokenSource();
+        _lyrics = null;
+        if (_overlay is { } overlay)
+            overlay.UpdateLyrics(null, GetCurrentPosition(state));
+        _ = FindLyricsAsync(_lyricsTrackKey, state, _lyricsSourcePreference,
+            _lyricsLookupCancellation.Token);
+    }
+
     private byte[]? _lastArtwork;
 
-    private async Task FindLyricsAsync(string trackKey, MediaSessionState state, CancellationToken token)
+    private async Task FindLyricsAsync(
+        string trackKey,
+        MediaSessionState state,
+        LyricsSourcePreference sourcePreference,
+        CancellationToken token)
     {
         try
         {
             var result = await _lyricsService.FindAsync(
-                new LyricsRequest(state.Title, state.Artist, state.Album, state.Duration), token);
+                new LyricsRequest(state.Title, state.Artist, state.Album, state.Duration),
+                sourcePreference, token);
             if (token.IsCancellationRequested) return;
             var dispatcher = Application.Current.Dispatcher;
             await dispatcher.InvokeAsync(() =>

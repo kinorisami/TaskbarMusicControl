@@ -43,6 +43,7 @@ public partial class MusicOverlayWindow : Window
     private bool _lyricsMode;
     private bool _hoverPlaybackOnlyMode;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
+    private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
     private double _lastAvailableWidth = DefaultWidth;
     private double _responsiveLayoutWidth = -1;
     private LyricsDocument? _lyrics;
@@ -58,6 +59,7 @@ public partial class MusicOverlayWindow : Window
     public event EventHandler? NextRequested;
     public event Action<object?, bool>? LyricsModeChanged;
     internal event Action<object?, WidgetDisplayMode>? DisplayModeChanged;
+    internal event Action<object?, LyricsSourcePreference>? LyricsSourceChanged;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -345,6 +347,29 @@ public partial class MusicOverlayWindow : Window
 
         SetDisplayMode(mode);
         DisplayModeChanged?.Invoke(this, mode);
+    }
+
+    internal void SetLyricsSource(LyricsSourcePreference preference)
+    {
+        _lyricsSourcePreference = preference;
+        var sourceMenu = RootBorder.ContextMenu?.Items.OfType<MenuItem>()
+            .FirstOrDefault(menu => menu.Header?.ToString() == "Lyric source");
+        foreach (var item in sourceMenu?.Items.OfType<MenuItem>() ?? [])
+        {
+            item.IsCheckable = true;
+            item.IsChecked = Enum.TryParse<LyricsSourcePreference>(item.Tag?.ToString(), out var value) &&
+                value == preference;
+        }
+    }
+
+    private void OnLyricsSourceClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem item ||
+            !Enum.TryParse<LyricsSourcePreference>(item.Tag?.ToString(), out var preference))
+            return;
+
+        SetLyricsSource(preference);
+        LyricsSourceChanged?.Invoke(this, preference);
     }
 
     private void SetHoverPlaybackOnlyMode(bool enabled)

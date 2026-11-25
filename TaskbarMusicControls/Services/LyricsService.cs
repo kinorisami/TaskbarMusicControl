@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 namespace TaskbarMusicControls.Services;
 
 internal sealed record LyricsRequest(string Title, string Artist, string Album, TimeSpan Duration);
+internal enum LyricsSourcePreference { Automatic, Netease, Lrclib }
 internal sealed record LyricTrackLine(TimeSpan? Time, string Text);
 internal sealed record LyricFrame(string Text, TimeSpan? Time, TimeSpan? NextTime);
 internal sealed record LyricsFrame(LyricFrame? Original, LyricFrame? Translation);
@@ -65,38 +66,51 @@ internal sealed class LyricsService
     private readonly LrclibLyricsProvider _online = new();
     private readonly LyricsCache _cache = new();
 
-    public async Task<LyricsDocument?> FindAsync(LyricsRequest request, CancellationToken token)
+    public async Task<LyricsDocument?> FindAsync(
+        LyricsRequest request, LyricsSourcePreference preference, CancellationToken token)
     {
-        try
+        if (preference == LyricsSourcePreference.Automatic)
         {
-            var local = await _local.FindAsync(request, token).ConfigureAwait(false);
-        if (local is { HasLyrics: true }) return local;
+            try
+            {
+                var local = await _local.FindAsync(request, token).ConfigureAwait(false);
+                if (local is { HasLyrics: true }) return local;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception) { /* Continue with online providers. */ }
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (Exception) { /* Continue with the cache and online provider. */ }
 
         token.ThrowIfCancellationRequested();
-        var neteaseCached = await _cache.ReadAsync(request, "netease", token).ConfigureAwait(false);
-        if (neteaseCached is { HasLyrics: true }) return neteaseCached;
-
-        try
+        if (preference != LyricsSourcePreference.Lrclib)
         {
-            var neteaseLyrics = await _netease.FindAsync(request, token).ConfigureAwait(false);
-            if (neteaseLyrics is { HasLyrics: true })
+            var neteaseCached = await _cache.ReadAsync(request, "netease", token).ConfigureAwait(false);
+            if (neteaseCached is { HasLyrics: true }) return neteaseCached;
+
+            try
             {
-                await TryCacheAsync(request, "netease", neteaseLyrics, token).ConfigureAwait(false);
-                return neteaseLyrics;
+                var neteaseLyrics = await _netease.FindAsync(request, token).ConfigureAwait(false);
+                if (neteaseLyrics is { HasLyrics: true })
+                {
+                    await TryCacheAsync(request, "netease", neteaseLyrics, token).ConfigureAwait(false);
+                    return neteaseLyrics;
+                }
             }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception) { /* Automatic mode can continue to LRCLIB. */ }
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (Exception) { /* Continue to the LRCLIB fallback. */ }
+
+        if (preference == LyricsSourcePreference.Netease)
+            return null;
 
         var cached = await _cache.ReadAsync(request, "lrclib", token).ConfigureAwait(false);
         if (cached is { HasLyrics: true }) return cached;
 
         // Read caches created by older versions, which did not record the provider.
-        cached = await _cache.ReadLegacyAsync(request, token).ConfigureAwait(false);
-        if (cached is { HasLyrics: true }) return cached;
+        if (preference == LyricsSourcePreference.Automatic)
+        {
+            cached = await _cache.ReadLegacyAsync(request, token).ConfigureAwait(false);
+            if (cached is { HasLyrics: true }) return cached;
+        }
 
         try
         {

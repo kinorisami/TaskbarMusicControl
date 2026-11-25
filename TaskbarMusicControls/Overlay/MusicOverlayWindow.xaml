@@ -111,6 +111,14 @@
                           Tag="CoverOnly"
                           IsCheckable="True"
                           Click="OnDisplayModeClick"/>
+                <MenuItem Header="Lyric source">
+                    <MenuItem Header="Automatic (local, NetEase, LRCLIB)"
+                              Tag="Automatic" Click="OnLyricsSourceClick"/>
+                    <MenuItem Header="NetEase Music"
+                              Tag="Netease" Click="OnLyricsSourceClick"/>
+                    <MenuItem Header="LRCLIB"
+                              Tag="Lrclib" Click="OnLyricsSourceClick"/>
+                </MenuItem>
                 <Separator/>
                 <MenuItem Header="Exit Taskbar Music Widget"
                           Click="OnExitClick"/>
