@@ -1,0 +1,193 @@
+<Window x:Class="TaskbarMusicControls.Overlay.MusicOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="350" Height="60"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Focusable="False">
+
+    <Window.Resources>
+        <Style x:Key="TransportButton" TargetType="Button">
+            <Setter Property="Width" Value="24"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Foreground" Value="#30343A"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Focusable" Value="False"/>
+
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="4">
+                            <ContentPresenter
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"/>
+                        </Border>
+
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder"
+                                        Property="Background"
+                                        Value="#18000000"/>
+                            </Trigger>
+
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder"
+                                        Property="Background"
+                                        Value="#28000000"/>
+                            </Trigger>
+
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.48"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PlayButton"
+               TargetType="Button"
+               BasedOn="{StaticResource TransportButton}">
+            <Setter Property="Foreground" Value="#167C69"/>
+            <Setter Property="FontSize" Value="18"/>
+        </Style>
+    </Window.Resources>
+
+    <Border Background="Transparent"
+            BorderBrush="Transparent"
+            BorderThickness="0"
+            Padding="0"
+            MouseRightButtonUp="OnRootMouseRightButtonUp">
+
+        <Border.ContextMenu>
+            <ContextMenu>
+                <MenuItem Header="Exit Taskbar Music Widget"
+                          Click="OnExitClick"/>
+            </ContextMenu>
+        </Border.ContextMenu>
+
+        <Grid>
+            <!-- Horizontal layout -->
+            <Grid x:Name="HorizontalContent">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="ArtworkColumn" Width="50"/>
+                    <ColumnDefinition x:Name="MetadataColumn" Width="*"/>
+                    <ColumnDefinition x:Name="ControlsColumn" Width="88"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Album artwork -->
+                <Border x:Name="Artwork"
+                        Width="48"
+                        Height="48"
+                        VerticalAlignment="Center">
+
+                    <Border.Background>
+                        <SolidColorBrush Color="#26353D"/>
+                    </Border.Background>
+
+                    <Grid>
+                        <TextBlock x:Name="ArtworkGlyph"
+                                   Text="♫"
+                                   FontFamily="Segoe UI Symbol"
+                                   FontSize="28"
+                                   Foreground="#267D6C"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+
+                        <Image x:Name="ArtworkImage"
+                               Stretch="UniformToFill"
+                               Visibility="Collapsed"/>
+                    </Grid>
+                </Border>
+
+                <!-- Track metadata -->
+                <Grid x:Name="MetadataPanel"
+                      Grid.Column="1"
+                      Margin="8,0,10,0"
+                      VerticalAlignment="Center"
+                      ClipToBounds="True"
+                      SizeChanged="OnMetadataSizeChanged">
+
+                    <StackPanel VerticalAlignment="Center">
+                        <Canvas x:Name="TitleCanvas" Height="18" ClipToBounds="True">
+                            <StackPanel Orientation="Horizontal">
+                                <StackPanel.RenderTransform>
+                                    <TranslateTransform x:Name="TitleTranslation"/>
+                                </StackPanel.RenderTransform>
+                                <TextBlock x:Name="TitlePrimary"
+                                           Text="No media playing"
+                                           Foreground="#202124"
+                                           FontWeight="SemiBold"
+                                           FontSize="13"/>
+                                <Border x:Name="TitleSpacer" Width="32" Visibility="Collapsed"/>
+                                <TextBlock x:Name="TitleSecondary"
+                                           Foreground="#202124"
+                                           FontWeight="SemiBold"
+                                           FontSize="13"
+                                           Visibility="Collapsed"/>
+                            </StackPanel>
+                        </Canvas>
+                        <Canvas x:Name="ArtistCanvas" Height="16" ClipToBounds="True">
+                            <StackPanel Orientation="Horizontal">
+                                <StackPanel.RenderTransform>
+                                    <TranslateTransform x:Name="ArtistTranslation"/>
+                                </StackPanel.RenderTransform>
+                                <TextBlock x:Name="ArtistPrimary"
+                                           Text="Start playback in a media app"
+                                           Foreground="#50545A"
+                                           FontSize="11"/>
+                                <Border x:Name="ArtistSpacer" Width="32" Visibility="Collapsed"/>
+                                <TextBlock x:Name="ArtistSecondary"
+                                           Foreground="#50545A"
+                                           FontSize="11"
+                                           Visibility="Collapsed"/>
+                            </StackPanel>
+                        </Canvas>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Playback controls -->
+                <StackPanel Grid.Column="2"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+
+                    <Button x:Name="PreviousButton"
+                            Style="{StaticResource TransportButton}"
+                            Width="22"
+                            Content="◂"
+                            AutomationProperties.Name="Previous track"
+                            Click="OnPreviousClick"
+                            IsEnabled="False"/>
+
+                    <Button x:Name="ToggleButton"
+                            Style="{StaticResource PlayButton}"
+                            Width="30"
+                            Height="30"
+                            Content="▶"
+                            AutomationProperties.Name="Play or pause"
+                            Click="OnToggleClick"
+                            IsEnabled="False"/>
+
+                    <Button x:Name="NextButton"
+                            Style="{StaticResource TransportButton}"
+                            Width="22"
+                            Content="▸"
+                            AutomationProperties.Name="Next track"
+                            Click="OnNextClick"
+                            IsEnabled="False"/>
+                </StackPanel>
+            </Grid>
+
+        </Grid>
+    </Border>
+</Window>
