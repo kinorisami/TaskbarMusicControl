@@ -58,6 +58,9 @@ public partial class MusicOverlayWindow : Window
     private nint _nativeHandle;
     private string _currentTitle = "No media playing";
     private string _currentArtist = "Start playback in a media app";
+    private byte[]? _currentArtworkBytes;
+    private int _artworkDecodeWidth;
+    private bool _artworkRenderFailed;
     private bool _lyricsMode;
     private TimeSpan _lyricsOffset;
     private TimeSpan _lastLyricsPosition;
@@ -108,24 +111,48 @@ public partial class MusicOverlayWindow : Window
         TitleCanvas.ToolTip = $"{_currentTitle}{Environment.NewLine}{_currentArtist}";
         ArtistCanvas.ToolTip = _currentArtist;
 
+        // The same byte array means the same image: decoding it again would
+        // only throw away the bitmap that is already on screen. A failed decode
+        // and a changed display scale are the exceptions.
+        var decodeWidth = GetArtworkDecodeWidth();
+        if (!ReferenceEquals(artworkBytes, _currentArtworkBytes) ||
+            decodeWidth != _artworkDecodeWidth ||
+            _artworkRenderFailed)
+        {
+            _currentArtworkBytes = artworkBytes;
+            _artworkDecodeWidth = decodeWidth;
+            _artworkRenderFailed = !ApplyArtwork(artworkBytes, decodeWidth);
+        }
+
+        ScheduleMarqueeRefresh();
+    }
+
+    /// <summary>
+    /// The width the cover is decoded at. The cover is rendered 48x48 DIP, so
+    /// decoding it larger would keep a full resolution bitmap alive for a
+    /// thumbnail.
+    /// </summary>
+    private int GetArtworkDecodeWidth()
+    {
+        var dpi = GetDpiScale(_taskbarHandle);
+        return (int)Math.Max(
+            48,
+            Math.Ceiling(48 * Math.Max(dpi.DpiScaleX, dpi.DpiScaleY)));
+    }
+
+    private bool ApplyArtwork(byte[]? artworkBytes, int decodeWidth)
+    {
         if (artworkBytes is not { Length: > 0 })
         {
             ArtworkImage.Source = null;
             ArtworkImage.Visibility = Visibility.Collapsed;
             ArtworkGlyph.Visibility = Visibility.Visible;
-            ScheduleMarqueeRefresh();
-            return;
+            return true;
         }
 
         try
         {
             using var stream = new MemoryStream(artworkBytes, writable: false);
-            var dpi = GetDpiScale(_taskbarHandle);
-            // Decode at the rendered 48x48 DIP cover size (96px at 200%) so WPF does
-            // not keep a full-resolution bitmap alive for a 48px thumbnail.
-            var decodeWidth = (int)Math.Max(
-                48,
-                Math.Ceiling(48 * Math.Max(dpi.DpiScaleX, dpi.DpiScaleY)));
             var image = new BitmapImage();
             image.BeginInit();
             image.CacheOption = BitmapCacheOption.OnLoad;
@@ -140,15 +167,15 @@ public partial class MusicOverlayWindow : Window
             ArtworkImage.Source = image;
             ArtworkImage.Visibility = Visibility.Visible;
             ArtworkGlyph.Visibility = Visibility.Collapsed;
+            return true;
         }
         catch (Exception)
         {
             ArtworkImage.Source = null;
             ArtworkImage.Visibility = Visibility.Collapsed;
             ArtworkGlyph.Visibility = Visibility.Visible;
+            return false;
         }
-
-        ScheduleMarqueeRefresh();
     }
 
     public void UpdatePlaybackState(
