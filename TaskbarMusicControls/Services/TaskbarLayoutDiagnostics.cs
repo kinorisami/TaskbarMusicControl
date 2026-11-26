@@ -14,4 +14,12 @@ internal static class TaskbarLayoutDiagnostics
     [Conditional("DEBUG")]
     public static void Write(string message) =>
         Sink.Write($"{DateTimeOffset.Now:O} {message}");
+
+    /// <summary>
+    /// Errors are recorded in every build. A failure that silently stops the
+    /// layout refresh leaves the widget in a state the user cannot explain,
+    /// so those lines must survive a release build.
+    /// </summary>
+    public static void WriteError(string message) =>
+        Sink.Write($"{DateTimeOffset.Now:O} ERROR {message}");
 }
