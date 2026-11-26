@@ -53,6 +53,28 @@ internal sealed class TaskbarDetector
     internal static bool IsTaskbarClassName(string className) =>
         className is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd";
 
+    /// <summary>
+    /// Cheap check that only looks at the class names of the top level windows.
+    /// Used to poll whether the taskbar became enumerable again without paying
+    /// for the full monitor bookkeeping of <see cref="DetectTaskbars"/>.
+    /// </summary>
+    public bool HasTaskbarWindow()
+    {
+        var found = false;
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            var className = new StringBuilder(256);
+            NativeMethods.GetClassName(hwnd, className, className.Capacity);
+            if (!IsTaskbarClassName(className.ToString()))
+                return true;
+
+            found = true;
+            return false;
+        }, IntPtr.Zero);
+
+        return found;
+    }
+
     private static string GetDisplayName(string deviceId)
     {
         if (string.IsNullOrWhiteSpace(deviceId))

@@ -1,11 +1,13 @@
 using System.Windows;
 using System.Windows.Threading;
+using TaskbarMusicControls.Interop;
 using TaskbarMusicControls.Overlay;
 
 namespace TaskbarMusicControls.Services;
 
 internal sealed class TaskbarMusicWidgetService
 {
+    private const int TaskbarSettleTicks = 4;
     private readonly TaskbarDetector _taskbarDetector = new();
     private readonly TaskbarLayoutDetector _layoutDetector = new();
     private readonly TaskbarLayoutMonitor _layoutMonitor = new();
@@ -32,6 +34,10 @@ internal sealed class TaskbarMusicWidgetService
     {
         Interval = TimeSpan.FromSeconds(2)
     };
+    private readonly DispatcherTimer _taskbarRecoveryTimer = new()
+    {
+        Interval = TimeSpan.FromSeconds(2)
+    };
 
     private MusicOverlayWindow? _overlay;
     private IntPtr _watchedTaskbar;
@@ -51,6 +57,8 @@ internal sealed class TaskbarMusicWidgetService
     private Rect _positionedTaskbarBounds;
     private Rect _positionedAvailableBounds;
     private bool _forceReposition;
+    private bool _taskbarTemporarilyMissing;
+    private int _taskbarSettleTicks;
 
     private sealed record TaskbarLayoutEntry(
         TaskbarInfo Taskbar,
@@ -61,6 +69,7 @@ internal sealed class TaskbarMusicWidgetService
         _layoutTimer.Tick += OnLayoutTimerTick;
         _layoutChangeTimer.Tick += OnLayoutChangeTimerTick;
         _nativeHandleTimer.Tick += OnNativeHandleTimerTick;
+        _taskbarRecoveryTimer.Tick += OnTaskbarRecoveryTimerTick;
         _lyricsTimer.Tick += OnLyricsTimerTick;
         _timelineSyncTimer.Tick += OnTimelineSyncTimerTick;
         _layoutMonitor.LayoutChanged += OnTaskbarLayoutChanged;
@@ -363,6 +372,45 @@ internal sealed class TaskbarMusicWidgetService
             _ = RefreshTaskbarLayoutAsync();
     }
 
+    private void OnTaskbarRecoveryTimerTick(object? sender, EventArgs e)
+    {
+        // The probe only runs while the taskbar is known to be temporarily
+        // missing from the window list, so the normal case costs nothing.
+        try
+        {
+            if (!_taskbarDetector.HasTaskbarWindow())
+                return;
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (_taskbarSettleTicks <= 0)
+        {
+            // The taskbar is enumerable again. Refresh right away and keep
+            // refreshing for a short settle window: the shell often commits the
+            // new taskbar layout (a tray icon moved into the hidden icons, a
+            // new taskbar button) a moment after the flyout is closed, and a
+            // single refresh would still see the old layout.
+            _taskbarSettleTicks = TaskbarSettleTicks;
+            TaskbarLayoutDiagnostics.Write(
+                "taskbar is enumerable again: scheduling layout refreshes");
+        }
+        else
+        {
+            _taskbarSettleTicks--;
+            if (_taskbarSettleTicks == 0)
+            {
+                _taskbarRecoveryTimer.Stop();
+                TaskbarLayoutDiagnostics.Write("taskbar settle window finished");
+                return;
+            }
+        }
+
+        ScheduleLayoutRefresh();
+    }
+
     private async Task RefreshTaskbarLayoutAsync()
     {
         if (_layoutRefreshInProgress)
@@ -391,6 +439,18 @@ internal sealed class TaskbarMusicWidgetService
                     var taskbar = entry.Taskbar.Handle;
                     var layout = entry.Layout;
                     WatchTaskbar(taskbar);
+
+                    if (_taskbarTemporarilyMissing)
+                    {
+                        // The taskbar is enumerable again after a shell flyout was
+                        // closed. The layout comparison below decides whether the
+                        // overlay has to be moved; the probe keeps refreshing for a
+                        // short settle window because the shell can commit the new
+                        // taskbar layout a moment later.
+                        _taskbarTemporarilyMissing = false;
+                        TaskbarLayoutDiagnostics.Write(
+                            "taskbar is enumerable again: layout refreshed");
+                    }
 
                     if (_overlay is null)
                     {
@@ -450,12 +510,30 @@ internal sealed class TaskbarMusicWidgetService
                     break;
                 }
 
-                if (!foundLayout && _overlay is { HasValidNativeHandle: true } &&
-                    !HasTaskbarWindow())
+                if (!foundLayout && _overlay is { HasValidNativeHandle: true })
                 {
-                    TaskbarLayoutDiagnostics.Write(
-                        "hide overlay: no taskbar window is available");
-                    _overlay.Hide();
+                    if (IsKnownTaskbarAlive())
+                    {
+                        // Explorer stops exposing the taskbar as a top-level
+                        // window while a shell flyout (the Start menu, the
+                        // notification center, ...) is open. The taskbar and the
+                        // widget are still alive, so the widget stays on screen
+                        // and a probe watches for the taskbar coming back.
+                        if (!_taskbarTemporarilyMissing)
+                        {
+                            TaskbarLayoutDiagnostics.Write(
+                                "keep overlay: taskbar is temporarily not enumerable");
+                        }
+                        _taskbarTemporarilyMissing = true;
+                        _taskbarSettleTicks = 0;
+                        _taskbarRecoveryTimer.Start();
+                    }
+                    else if (!HasTaskbarWindow())
+                    {
+                        TaskbarLayoutDiagnostics.Write(
+                            "hide overlay: no taskbar window is available");
+                        _overlay.Hide();
+                    }
                 }
             }
             while (_layoutRefreshRequested);
@@ -468,6 +546,14 @@ internal sealed class TaskbarMusicWidgetService
 
     private bool HasTaskbarWindow()
     {
+        // While the Start menu (or another shell flyout) is open, Explorer stops
+        // exposing the taskbar as a top-level window, so the enumeration below
+        // comes back empty even though the taskbar is still there and the widget
+        // is still attached to it. Keep the widget visible whenever the taskbar
+        // window we already know about is still alive.
+        if (IsKnownTaskbarAlive())
+            return true;
+
         try
         {
             return _taskbarDetector.DetectTaskbars().Count > 0;
@@ -477,6 +563,19 @@ internal sealed class TaskbarMusicWidgetService
             // If enumeration fails, keep the overlay where it is instead of hiding it.
             return true;
         }
+    }
+
+    private bool IsKnownTaskbarAlive()
+    {
+        foreach (var handle in new[] { _positionedTaskbar, _watchedTaskbar })
+        {
+            if (handle == 0)
+                continue;
+            if (NativeMethods.IsWindow(handle))
+                return true;
+        }
+
+        return false;
     }
 
     private static bool RectsNearEqual(Rect left, Rect right)
@@ -555,6 +654,7 @@ internal sealed class TaskbarMusicWidgetService
         _layoutTimer.Stop();
         _layoutChangeTimer.Stop();
         _nativeHandleTimer.Stop();
+        _taskbarRecoveryTimer.Stop();
         _lyricsTimer.Stop();
         _timelineSyncTimer.Stop();
         _lyricsLookupCancellation?.Cancel();
