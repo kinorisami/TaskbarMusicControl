@@ -5,3 +5,4 @@ _build-check/
 *.user
 *.pubxml
 *.ps1
+CLAUDE.md
