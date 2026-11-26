@@ -7,6 +7,7 @@ namespace TaskbarMusicControls.Services;
 
 internal sealed class TaskbarMusicWidgetService
 {
+    private const int TaskbarSettleTicks = 4;
     private readonly TaskbarDetector _taskbarDetector = new();
     private readonly TaskbarLayoutDetector _layoutDetector = new();
     private readonly TaskbarLayoutMonitor _layoutMonitor = new();
@@ -57,6 +58,7 @@ internal sealed class TaskbarMusicWidgetService
     private Rect _positionedAvailableBounds;
     private bool _forceReposition;
     private bool _taskbarTemporarilyMissing;
+    private int _taskbarSettleTicks;
 
     private sealed record TaskbarLayoutEntry(
         TaskbarInfo Taskbar,
@@ -384,9 +386,28 @@ internal sealed class TaskbarMusicWidgetService
             return;
         }
 
-        TaskbarLayoutDiagnostics.Write(
-            "taskbar is enumerable again: scheduling a layout refresh");
-        _taskbarRecoveryTimer.Stop();
+        if (_taskbarSettleTicks <= 0)
+        {
+            // The taskbar is enumerable again. Refresh right away and keep
+            // refreshing for a short settle window: the shell often commits the
+            // new taskbar layout (a tray icon moved into the hidden icons, a
+            // new taskbar button) a moment after the flyout is closed, and a
+            // single refresh would still see the old layout.
+            _taskbarSettleTicks = TaskbarSettleTicks;
+            TaskbarLayoutDiagnostics.Write(
+                "taskbar is enumerable again: scheduling layout refreshes");
+        }
+        else
+        {
+            _taskbarSettleTicks--;
+            if (_taskbarSettleTicks == 0)
+            {
+                _taskbarRecoveryTimer.Stop();
+                TaskbarLayoutDiagnostics.Write("taskbar settle window finished");
+                return;
+            }
+        }
+
         ScheduleLayoutRefresh();
     }
 
@@ -422,13 +443,13 @@ internal sealed class TaskbarMusicWidgetService
                     if (_taskbarTemporarilyMissing)
                     {
                         // The taskbar is enumerable again after a shell flyout was
-                        // closed. Refresh the layout right away instead of waiting
-                        // for the next periodic scan. The layout comparison below
-                        // decides whether the overlay has to be moved.
+                        // closed. The layout comparison below decides whether the
+                        // overlay has to be moved; the probe keeps refreshing for a
+                        // short settle window because the shell can commit the new
+                        // taskbar layout a moment later.
                         _taskbarTemporarilyMissing = false;
-                        _taskbarRecoveryTimer.Stop();
                         TaskbarLayoutDiagnostics.Write(
-                            "taskbar is enumerable again: refreshing the layout");
+                            "taskbar is enumerable again: layout refreshed");
                     }
 
                     if (_overlay is null)
@@ -504,6 +525,7 @@ internal sealed class TaskbarMusicWidgetService
                                 "keep overlay: taskbar is temporarily not enumerable");
                         }
                         _taskbarTemporarilyMissing = true;
+                        _taskbarSettleTicks = 0;
                         _taskbarRecoveryTimer.Start();
                     }
                     else if (!HasTaskbarWindow())
