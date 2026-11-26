@@ -104,6 +104,7 @@ LRC 时间戳用于跟随播放进度；同一时间戳的连续两行会作为�
 - `Lyrics\Cache`：在线歌词缓存。
 - `Logs\playback-sync.log`：播放位置校正诊断日志（仅 Debug 构建）。
 - `Logs\taskbar-layout.log`：任务栏布局探测诊断日志（除错误信息外仅 Debug 构建；错误行在所有构建中都会记录）。
+- `Logs\artwork.log`：封面读取与封面切换诊断日志（除错误信息外仅 Debug 构建；错误行在所有构建中都会记录）。
 
 ## 网络与隐私
 
