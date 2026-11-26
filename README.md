@@ -51,11 +51,26 @@ dotnet build .\TaskbarMusicControls\TaskbarMusicControls.csproj -c Release
 生成适用于 64 位 Windows 的独立发布目录（目标机器无需预装 .NET Desktop Runtime）：
 
 ```powershell
-dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj `
-  -c Release -r win-x64 --self-contained true
+dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj -c Release -r win-x64 `
+  --self-contained true -p:PublishSingleFile=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true `
+  -p:DebugType=None -p:DebugSymbols=false `
+  -o .\TaskbarMusicControls-v0.2.0-win-x64-standalone
 ```
 
-发布文件位于 `TaskbarMusicControls/bin/Release/` 下对应的目标框架和运行时目录中。
+生成依赖已安装的 .NET Desktop Runtime 的单文件发布目录：
+
+```powershell
+dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj -c Release -r win-x64 `
+  --no-self-contained -p:PublishSingleFile=true `
+  -p:DebugType=None -p:DebugSymbols=false `
+  -o .\TaskbarMusicControls-v0.2.0-win-x64-net10
+```
+
+两种发布目录都生成在项目根目录下：
+
+- `TaskbarMusicControls-v0.2.0-win-x64-standalone`：**独立发布**，运行时已打包进去，目标机器无需安装任何东西 —— 分发给用户请用这个。
+- `TaskbarMusicControls-v0.2.0-win-x64-net10`：**依赖 .NET 10 桌面运行时**，体积更小，但目标机器没有安装 .NET 10 Desktop Runtime 时会弹出“需要下载运行时”的提示。
 
 ## 使用
 

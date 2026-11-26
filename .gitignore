@@ -6,3 +6,4 @@ _build-check/
 *.pubxml
 *.ps1
 CLAUDE.md
+TaskbarMusicControls-v*-win-x64-*/
