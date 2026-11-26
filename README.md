@@ -21,6 +21,8 @@
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/39170e90-c827-454b-97fe-f72b75d06370" />
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/68f5bed3-bc58-409a-b910-d75494a29516" />
 
+歌词只在**完整信息**布局下显示：另外两种布局不放歌词按钮，也放不下歌词面板。切换布局不会改变已经打开的歌词开关，切回完整信息布局时会重新显示歌词。
+
 ## 系统要求
 
 - Windows 10 版本 1809（内部版本 17763）或更新版本。
