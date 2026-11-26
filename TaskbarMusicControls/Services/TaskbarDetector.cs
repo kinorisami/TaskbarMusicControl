@@ -1,5 +1,6 @@
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
 using System.Windows;
 using TaskbarMusicControls.Interop;
 
@@ -18,6 +19,11 @@ internal sealed class TaskbarDetector
 {
     private const int MonitorDefaultToNearest = 2;
     private const int MonitorDefaultToPrimary = 1;
+
+    // Display names never change while the machine is running, so the
+    // (comparatively expensive) display device lookup is done once per device.
+    private static readonly ConcurrentDictionary<string, string> DisplayNameCache =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<TaskbarInfo> DetectTaskbars()
     {
@@ -80,11 +86,16 @@ internal sealed class TaskbarDetector
         if (string.IsNullOrWhiteSpace(deviceId))
             return "Unknown display";
 
+        if (DisplayNameCache.TryGetValue(deviceId, out var cached))
+            return cached;
+
         var display = new DisplayDevice { Size = Marshal.SizeOf<DisplayDevice>() };
-        return EnumDisplayDevices(deviceId, 0, ref display, 0) &&
-               !string.IsNullOrWhiteSpace(display.DeviceString)
+        var name = EnumDisplayDevices(deviceId, 0, ref display, 0) &&
+                   !string.IsNullOrWhiteSpace(display.DeviceString)
             ? display.DeviceString
             : deviceId;
+        DisplayNameCache[deviceId] = name;
+        return name;
     }
 
     [StructLayout(LayoutKind.Sequential)]

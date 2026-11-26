@@ -59,6 +59,7 @@ internal sealed class TaskbarMusicWidgetService
     private bool _forceReposition;
     private bool _taskbarTemporarilyMissing;
     private int _taskbarSettleTicks;
+    private bool _attachmentFailureReported;
 
     private sealed record TaskbarLayoutEntry(
         TaskbarInfo Taskbar,
@@ -111,11 +112,13 @@ internal sealed class TaskbarMusicWidgetService
         var overlay = new MusicOverlayWindow();
         overlay.SetDisplayMode(_displayMode);
         overlay.SetTaskbarOptions(_taskbarOptions, _selectedTaskbarDeviceId);
-        if (!overlay.PositionInAvailableArea(
-                taskbarHandle,
-                layout.TaskbarBounds,
-                layout.AvailableBounds))
+        var position = overlay.PositionInAvailableArea(
+            taskbarHandle,
+            layout.TaskbarBounds,
+            layout.AvailableBounds);
+        if (position != TaskbarPositionResult.Positioned)
         {
+            ReportPositionFailure(position, taskbarHandle);
             overlay.Close();
             return false;
         }
@@ -141,10 +144,12 @@ internal sealed class TaskbarMusicWidgetService
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
         ApplyMediaState(overlay, state);
         overlay.Show();
-        overlay.PositionInAvailableArea(
+        var finalPosition = overlay.PositionInAvailableArea(
             taskbarHandle,
             layout.TaskbarBounds,
             layout.AvailableBounds);
+        if (finalPosition != TaskbarPositionResult.Positioned)
+            ReportPositionFailure(finalPosition, taskbarHandle);
         overlay.Dispatcher.BeginInvoke(
             System.Windows.Threading.DispatcherPriority.Loaded,
             new Action(overlay.RaiseToTop));
@@ -169,11 +174,13 @@ internal sealed class TaskbarMusicWidgetService
         {
             // Apply the new width/layout right away with the last known taskbar
             // layout instead of waiting for the debounced UIA re-scan.
-            if (overlay.PositionInAvailableArea(
-                    _positionedTaskbar,
-                    _positionedTaskbarBounds,
-                    _positionedAvailableBounds))
+            var position = overlay.PositionInAvailableArea(
+                _positionedTaskbar,
+                _positionedTaskbarBounds,
+                _positionedAvailableBounds);
+            if (position == TaskbarPositionResult.Positioned)
                 return;
+            ReportPositionFailure(position, _positionedTaskbar);
         }
 
         _forceReposition = true;
@@ -481,13 +488,15 @@ internal sealed class TaskbarMusicWidgetService
                         TaskbarLayoutDiagnostics.Write(
                             $"reposition overlay: taskbar={taskbar} " +
                             $"available={layout.AvailableBounds}");
-                        if (!_overlay.PositionInAvailableArea(
-                                taskbar,
-                                layout.TaskbarBounds,
-                                layout.AvailableBounds))
+                        var position = _overlay.PositionInAvailableArea(
+                            taskbar,
+                            layout.TaskbarBounds,
+                            layout.AvailableBounds);
+                        if (position != TaskbarPositionResult.Positioned)
                         {
                             TaskbarLayoutDiagnostics.Write(
-                                "hide overlay: failed to position in available area");
+                                $"hide overlay: failed to position in available area ({position})");
+                            ReportPositionFailure(position, taskbar);
                             _overlay.Hide();
                             break;
                         }
@@ -538,9 +547,46 @@ internal sealed class TaskbarMusicWidgetService
             }
             while (_layoutRefreshRequested);
         }
+        catch (Exception ex)
+        {
+            // The refresh runs detached, so an unhandled exception would be lost
+            // and the widget would silently keep a stale layout.
+            TaskbarLayoutDiagnostics.WriteError(
+                $"layout refresh failed: {ex.GetType().Name}: {ex.Message}");
+        }
         finally
         {
             _layoutRefreshInProgress = false;
+        }
+    }
+
+    private void ReportPositionFailure(TaskbarPositionResult result, IntPtr taskbarHandle)
+    {
+        if (result != TaskbarPositionResult.NotAttached)
+            return;
+
+        TaskbarLayoutDiagnostics.WriteError(
+            $"the widget could not be attached to the taskbar window {taskbarHandle}; " +
+            "explorer probably runs with different privileges than this process");
+        if (_attachmentFailureReported)
+            return;
+
+        _attachmentFailureReported = true;
+        try
+        {
+            MessageBox.Show(
+                "无法把组件挂接到任务栏。\n\n" +
+                "Windows 会阻止权限级别不同的进程之间挂接窗口：如果资源管理器" +
+                "（Explorer）以管理员身份运行，本组件也需要以管理员身份运行；" +
+                "反之亦然。\n\n" +
+                "组件已经隐藏，请调整权限后重新启动。",
+                "Taskbar Music Controls",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+        catch (Exception)
+        {
+            // A missing message box must never take the widget down.
         }
     }
 

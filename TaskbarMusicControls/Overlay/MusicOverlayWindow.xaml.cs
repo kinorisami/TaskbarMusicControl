@@ -20,6 +20,22 @@ internal enum WidgetDisplayMode
     CoverOnly
 }
 
+/// <summary>
+/// Why the overlay could not be placed inside the taskbar.
+/// </summary>
+public enum TaskbarPositionResult
+{
+    Positioned,
+    /// <summary>The available area is empty or too narrow to host the widget.</summary>
+    NoSpace,
+    /// <summary>
+    /// The window could not be attached to the taskbar window. This normally
+    /// means Explorer runs with different privileges than this process, which
+    /// makes Windows block the cross process re-parenting.
+    /// </summary>
+    NotAttached
+}
+
 public partial class MusicOverlayWindow : Window
 {
     private const int GwlExStyle = -20;
@@ -214,21 +230,21 @@ public partial class MusicOverlayWindow : Window
         UpdateDisplayModeMenuChecks();
     }
 
-    public bool PositionInAvailableArea(
+    public TaskbarPositionResult PositionInAvailableArea(
         nint taskbarHandle,
         Rect taskbarBounds,
         Rect availableBounds)
     {
         if (availableBounds.IsEmpty || availableBounds.Width <= 0 ||
             taskbarBounds.Height <= 0)
-            return false;
+            return TaskbarPositionResult.NoSpace;
 
         var dpi = GetDpiScale(taskbarHandle);
         var availableWidth = availableBounds.Width / dpi.DpiScaleX;
         _lastAvailableWidth = availableWidth;
         var width = GetEffectiveWidth(availableWidth);
         if (width < MinimumWidth)
-            return false;
+            return TaskbarPositionResult.NoSpace;
 
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
@@ -248,7 +264,7 @@ public partial class MusicOverlayWindow : Window
         if (handle != 0)
         {
             if (!AttachToTaskbar(handle, taskbarHandle))
-                return false;
+                return TaskbarPositionResult.NotAttached;
 
             var rect = new NativeRect(
                 (int)Math.Round(physicalLeft),
@@ -266,7 +282,7 @@ public partial class MusicOverlayWindow : Window
                 SwpNoActivate);
         }
 
-        return true;
+        return TaskbarPositionResult.Positioned;
     }
 
     private void ApplyResponsiveLayout(double width)

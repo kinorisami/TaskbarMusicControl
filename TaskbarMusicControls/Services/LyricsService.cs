@@ -215,11 +215,29 @@ internal sealed class LyricsCache
             return null;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch (Exception)
+        catch (JsonException)
         {
-            try { File.Delete(path); } catch (Exception) { }
+            // The file is there but its content is broken: drop it so the next
+            // lookup can fetch the lyrics again.
+            TryDelete(path);
             return null;
         }
+        catch (NotSupportedException)
+        {
+            TryDelete(path);
+            return null;
+        }
+        catch (Exception)
+        {
+            // A transient failure (file locked, antivirus scan, disk hiccup)
+            // must not throw away a perfectly valid cache entry.
+            return null;
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { File.Delete(path); } catch (Exception) { }
     }
 
     public async Task WriteAsync(

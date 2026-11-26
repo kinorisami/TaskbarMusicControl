@@ -12,7 +12,7 @@ internal sealed class MediaSessionService
     private GlobalSystemMediaTransportControlsSession? _session;
     private string _clockTrackIdentity = "";
     private readonly object _artworkCacheGate = new();
-    private IRandomAccessStreamReference? _cachedThumbnail;
+    private string _cachedArtworkIdentity = "";
     private byte[]? _cachedArtwork;
 
     public event Action<MediaSessionState>? StateChanged;
@@ -184,7 +184,7 @@ internal sealed class MediaSessionService
             _refreshLock.Release();
         }
 
-        var artwork = await ReadArtworkAsync(thumbnail);
+        var artwork = await ReadArtworkAsync(thumbnail, trackIdentity);
         await PublishArtworkIfCurrentAsync(changedSession, trackIdentity, artwork);
     }
 
@@ -308,7 +308,7 @@ internal sealed class MediaSessionService
 
         // Artwork is loaded after committing metadata and the playback anchor so slow
         // thumbnail reads never hold up playback, timeline, or session-switch refreshes.
-        var artwork = await ReadArtworkAsync(thumbnail);
+        var artwork = await ReadArtworkAsync(thumbnail, trackIdentity);
         await PublishArtworkIfCurrentAsync(session, trackIdentity, artwork);
     }
 
@@ -347,14 +347,19 @@ internal sealed class MediaSessionService
     }
 
     private async Task<byte[]?> ReadArtworkAsync(
-        IRandomAccessStreamReference? thumbnail)
+        IRandomAccessStreamReference? thumbnail,
+        string trackIdentity)
     {
         if (thumbnail is null)
             return null;
 
+        // The artwork is cached per track instead of per thumbnail reference:
+        // players hand out a new reference object on every metadata change,
+        // which would re-read the image (up to 2 MB) over and over again.
         lock (_artworkCacheGate)
         {
-            if (ReferenceEquals(thumbnail, _cachedThumbnail))
+            if (!string.IsNullOrEmpty(trackIdentity) &&
+                string.Equals(trackIdentity, _cachedArtworkIdentity, StringComparison.Ordinal))
                 return _cachedArtwork;
         }
 
@@ -374,7 +379,7 @@ internal sealed class MediaSessionService
             reader.ReadBytes(bytes);
             lock (_artworkCacheGate)
             {
-                _cachedThumbnail = thumbnail;
+                _cachedArtworkIdentity = trackIdentity;
                 _cachedArtwork = bytes;
             }
             return bytes;
