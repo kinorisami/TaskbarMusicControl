@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.IO;
+using TaskbarMusicControls.Interop;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
 
@@ -29,6 +32,22 @@ internal sealed class MediaSessionService
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly PlaybackClock _playbackClock = new();
     private GlobalSystemMediaTransportControlsSessionManager? _manager;
+
+    /// <summary>True while any player exposes a media session at all.</summary>
+    public bool HasSession => _session is not null;
+
+    /// <summary>Which player the widget is showing; empty means "the current one".</summary>
+    private string _selectedPlayerId = "";
+    private IReadOnlyList<MediaPlayerOption> _players = Array.Empty<MediaPlayerOption>();
+
+    /// <summary>The players that expose a session right now.</summary>
+    public IReadOnlyList<MediaPlayerOption> Players => _players;
+
+    /// <summary>The player behind the session on screen, whoever picked it.</summary>
+    public string? ActivePlayerId => _session?.SourceAppUserModelId;
+
+    /// <summary>Raised when the set of players changes, on a pool thread.</summary>
+    public event Action? PlayersChanged;
     private GlobalSystemMediaTransportControlsSession? _session;
     private string _clockTrackIdentity = "";
     private readonly object _artworkGate = new();
@@ -47,6 +66,16 @@ internal sealed class MediaSessionService
     public MediaSessionState CurrentState { get; private set; } = MediaSessionState.Empty;
     public TimeSpan CurrentPosition => _playbackClock.GetCurrentPosition();
 
+    /// <summary>
+    /// Pins the widget to one player instead of following whatever Windows
+    /// considers current. An empty id goes back to following the current session.
+    /// </summary>
+    public void SelectPlayer(string? playerId)
+    {
+        _selectedPlayerId = playerId ?? "";
+        _ = Task.Run(() => RefreshCurrentSessionAsync());
+    }
+
     public async Task InitializeAsync()
     {
         try
@@ -54,7 +83,9 @@ internal sealed class MediaSessionService
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
             _manager.CurrentSessionChanged += OnCurrentSessionChanged;
             _manager.SessionsChanged += OnSessionsChanged;
-            await RefreshCurrentSessionAsync();
+            // Same reason as the event handlers: the first property reads and the
+            // thumbnail of the current session must not run on the UI thread.
+            await Task.Run(() => RefreshCurrentSessionAsync());
         }
         catch (Exception)
         {
@@ -62,19 +93,148 @@ internal sealed class MediaSessionService
         }
     }
 
-    public Task SkipPreviousAsync() => RunCommandAsync(session => session.TrySkipPreviousAsync());
+    // GSMTC is a synchronous COM call into the player: when the player is busy -
+    // which is exactly when a track changes - it blocks the calling thread for
+    // hundreds of milliseconds. Everything that talks to the session therefore
+    // runs on the thread pool, never on the UI thread.
+    public Task SkipPreviousAsync() =>
+        Task.Run(() => RunCommandAsync(session => session.TrySkipPreviousAsync()));
 
     public Task RefreshTimelineNowAsync()
     {
         var session = _session;
-        return session is null
-            ? Task.CompletedTask
-            : RefreshTimelineAsync(session);
+        return session is null ? Task.CompletedTask : Task.Run(() => RefreshTimelineAsync(session));
     }
 
-    public Task TogglePlaybackAsync() => RunCommandAsync(session => session.TryTogglePlayPauseAsync());
+    public Task TogglePlaybackAsync() =>
+        Task.Run(() => RunCommandAsync(session => session.TryTogglePlayPauseAsync()));
 
-    public Task SkipNextAsync() => RunCommandAsync(session => session.TrySkipNextAsync());
+    public Task SkipNextAsync() =>
+        Task.Run(() => RunCommandAsync(session => session.TrySkipNextAsync()));
+
+    /// <summary>
+    /// Shows or hides the window of the player behind the current session. A
+    /// Win32 player reports its executable as the session id, which is enough to
+    /// find its main window; for a packaged app there is no reliable way to get
+    /// there, so nothing happens.
+    /// </summary>
+    /// <remarks>
+    /// The second click puts the window away again. Which click is which is
+    /// tracked by this process rather than by asking Windows for the foreground
+    /// window: the widget cannot be activated, so the foreground window is not a
+    /// reliable hint by the time the click arrives.
+    /// </remarks>
+    public void TogglePlayerWindow()
+    {
+        var sessionId = _session?.SourceAppUserModelId;
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !sessionId.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        try
+        {
+            var processName = Path.GetFileNameWithoutExtension(sessionId);
+            var processes = Process.GetProcessesByName(processName);
+            if (processes.Length == 0)
+                return;
+
+            var processIds = processes.Select(process => (uint)process.Id).ToHashSet();
+
+            // Process.MainWindowHandle only reports a visible, unowned window, so
+            // it is 0 while the player sits in the tray. Enumerate the process's
+            // windows instead and prefer the visible one.
+            var handle = FindPlayerWindow(processIds, requireVisible: true);
+            if (handle == 0)
+                handle = FindPlayerWindow(processIds, requireVisible: false);
+            if (handle == 0)
+                return;
+
+            // Clicking the cover a second time puts the window away again; a
+            // player that was closed by hand is simply shown on the next click.
+            if (handle == _shownPlayerWindow && NativeMethods.IsWindowVisible(handle))
+            {
+                NativeMethods.ShowWindow(handle, NativeMethods.SwHide);
+                _shownPlayerWindow = nint.Zero;
+                return;
+            }
+
+            NativeMethods.ShowWindow(handle,
+                NativeMethods.IsIconic(handle) ? NativeMethods.SwRestore : NativeMethods.SwShow);
+            NativeMethods.SetForegroundWindow(handle);
+            _shownPlayerWindow = handle;
+        }
+        catch (Exception)
+        {
+            // A player that refuses to come forward is not worth an error.
+        }
+    }
+
+    private nint _shownPlayerWindow;
+
+    /// <summary>
+    /// The player's main window: the largest titled top-level window of its
+    /// process. The largest one is used so a small hidden helper window cannot be
+    /// picked instead of the real player.
+    /// </summary>
+    private static nint FindPlayerWindow(HashSet<uint> processIds, bool requireVisible)
+    {
+        var result = nint.Zero;
+        long bestArea = 0;
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
+            if (!processIds.Contains(processId))
+                return true;
+
+            if (NativeMethods.GetWindow(hwnd, NativeMethods.GwOwner) != nint.Zero)
+                return true;
+
+            if (NativeMethods.GetWindowTextLength(hwnd) == 0)
+                return true;
+
+            if (requireVisible && !NativeMethods.IsWindowVisible(hwnd))
+                return true;
+
+            if (!NativeMethods.GetWindowRect(hwnd, out var rect))
+                return true;
+
+            if (rect.Area <= bestArea)
+                return true;
+
+            bestArea = rect.Area;
+            result = hwnd;
+            return true;
+        }, nint.Zero);
+        return result;
+    }
+
+    public Task SeekAsync(TimeSpan position) => Task.Run(() => SeekCoreAsync(position));
+
+    private async Task SeekCoreAsync(TimeSpan position)
+    {
+        var session = _session;
+        if (session is null)
+            return;
+
+        if (position < TimeSpan.Zero)
+            position = TimeSpan.Zero;
+
+        try
+        {
+            await session.TryChangePlaybackPositionAsync(position.Ticks);
+        }
+        catch (Exception)
+        {
+            // A player that refuses the seek simply keeps playing from where it
+            // was; the clock is left alone.
+            return;
+        }
+
+        // Move the clock right away instead of waiting for the player to report
+        // the new position back.
+        _playbackClock.SeekTo(position);
+        await RefreshTimelineNowAsync();
+    }
 
     private async Task RunCommandAsync(
         Func<GlobalSystemMediaTransportControlsSession, Windows.Foundation.IAsyncOperation<bool>> command)
@@ -94,30 +254,117 @@ internal sealed class MediaSessionService
         }
     }
 
+    /// <summary>
+    /// The session to show: the pinned player when it is running, otherwise the
+    /// one Windows calls current. The player list is kept up to date here because
+    /// this is the only place that talks to the manager.
+    /// </summary>
+    private GlobalSystemMediaTransportControlsSession? ResolveSession()
+    {
+        var manager = _manager;
+        if (manager is null)
+            return null;
+
+        IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions;
+        try
+        {
+            sessions = manager.GetSessions();
+        }
+        catch (Exception)
+        {
+            return manager.GetCurrentSession();
+        }
+
+        UpdatePlayers(sessions);
+
+        if (_selectedPlayerId.Length > 0)
+        {
+            foreach (var candidate in sessions)
+            {
+                if (string.Equals(
+                        candidate.SourceAppUserModelId,
+                        _selectedPlayerId,
+                        StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+            }
+        }
+
+        try
+        {
+            return manager.GetCurrentSession();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private void UpdatePlayers(
+        IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions)
+    {
+        var options = new List<MediaPlayerOption>(sessions.Count);
+        foreach (var session in sessions)
+        {
+            var id = session.SourceAppUserModelId;
+            if (string.IsNullOrWhiteSpace(id))
+                continue;
+            options.Add(new MediaPlayerOption(id, DescribePlayer(id)));
+        }
+
+        options.Sort((left, right) => string.Compare(
+            left.DisplayName, right.DisplayName, StringComparison.OrdinalIgnoreCase));
+
+        var changed = options.Count != _players.Count;
+        for (var i = 0; !changed && i < options.Count; i++)
+            changed = !string.Equals(options[i].Id, _players[i].Id, StringComparison.Ordinal);
+
+        if (!changed)
+            return;
+
+        _players = options;
+        PlayersChanged?.Invoke();
+    }
+
+    /// <summary>A readable name for the AUMID: "cloudmusic.exe" or the package name.</summary>
+    private static string DescribePlayer(string appUserId)
+    {
+        if (appUserId.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            return Path.GetFileNameWithoutExtension(appUserId);
+
+        var name = appUserId;
+        var bang = name.IndexOf('!');
+        if (bang > 0)
+            name = name[..bang];
+        var underscore = name.IndexOf('_');
+        if (underscore > 0)
+            name = name[..underscore];
+        return name;
+    }
+
     private void OnCurrentSessionChanged(
         GlobalSystemMediaTransportControlsSessionManager sender,
         CurrentSessionChangedEventArgs args) =>
-        _ = RefreshCurrentSessionAsync();
+        _ = Task.Run(() => RefreshCurrentSessionAsync());
 
     private void OnSessionsChanged(
         GlobalSystemMediaTransportControlsSessionManager sender,
         SessionsChangedEventArgs args) =>
-        _ = RefreshCurrentSessionAsync();
+        _ = Task.Run(() => RefreshCurrentSessionAsync());
 
     private void OnMediaPropertiesChanged(
         GlobalSystemMediaTransportControlsSession sender,
         MediaPropertiesChangedEventArgs args) =>
-        _ = RefreshMediaPropertiesAsync(sender);
+        _ = Task.Run(() => RefreshMediaPropertiesAsync(sender));
 
     private void OnPlaybackInfoChanged(
         GlobalSystemMediaTransportControlsSession sender,
         PlaybackInfoChangedEventArgs args) =>
-        _ = RefreshPlaybackInfoAsync(sender);
+        _ = Task.Run(() => RefreshPlaybackInfoAsync(sender));
 
     private void OnTimelinePropertiesChanged(
         GlobalSystemMediaTransportControlsSession sender,
         TimelinePropertiesChangedEventArgs args) =>
-        _ = RefreshTimelineAsync(sender);
+        _ = Task.Run(() => RefreshTimelineAsync(sender));
 
     private async Task RefreshCurrentSessionAsync()
     {
@@ -125,7 +372,7 @@ internal sealed class MediaSessionService
         await _refreshLock.WaitAsync();
         try
         {
-            var nextSession = _manager?.GetCurrentSession();
+            var nextSession = ResolveSession();
             if (!ReferenceEquals(_session, nextSession))
             {
                 if (_session is not null)
@@ -310,6 +557,7 @@ internal sealed class MediaSessionService
                 CanPlayPause = canPlayPause,
                 CanGoPrevious = controls.IsPreviousEnabled,
                 CanGoNext = controls.IsNextEnabled,
+                CanSeek = controls.IsPlaybackPositionEnabled,
                 Duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : CurrentState.Duration
             });
         }
@@ -399,7 +647,8 @@ internal sealed class MediaSessionService
                 controls.IsPreviousEnabled,
                 controls.IsNextEnabled,
                 album,
-                timeline.EndTime));
+                timeline.EndTime,
+                controls.IsPlaybackPositionEnabled));
         }
         finally
         {
@@ -766,6 +1015,8 @@ internal sealed class MediaSessionService
 
 }
 
+internal sealed record MediaPlayerOption(string Id, string DisplayName);
+
 internal sealed record MediaSessionState(
     string Title,
     string Artist,
@@ -775,7 +1026,9 @@ internal sealed record MediaSessionState(
     bool CanGoPrevious,
     bool CanGoNext,
     string Album = "",
-    TimeSpan Duration = default)
+    TimeSpan Duration = default,
+    /// <summary>Whether the player accepts a jump to a playback position.</summary>
+    bool CanSeek = false)
 {
     public static MediaSessionState Empty { get; } = new(
         "No media playing",

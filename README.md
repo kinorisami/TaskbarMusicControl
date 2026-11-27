@@ -6,7 +6,7 @@
 
 - 显示歌曲标题、艺人、专辑封面和播放状态。
 - 控制上一首、播放/暂停、下一首；具体可用操作取决于播放器提供的媒体会话能力。
-- 三种显示布局：完整信息、封面与控制按钮、仅封面（悬停封面显示播放/暂停）。
+- 三种显示布局：完整（歌词铺满，鼠标移入时控制按钮从上方展开）、封面与控制按钮、仅封面（悬停封面显示播放/暂停）。
 - 显示同步歌词，支持原词和翻译双轨。
 - 歌词偏移可按歌曲单独设置，修正不同歌词版本的打轴误差。
 - 右键组件可选择歌词来源：
@@ -14,6 +14,10 @@
   - **NetEase Music**：只使用网易云音乐接口及对应缓存。
   - **LRCLIB**：只使用 LRCLIB 接口及对应缓存。
 - 右键组件可切换显示布局、选择歌词来源、调整歌词偏移、选择要挂载的任务栏/显示器，以及退出程序。
+- 跟随任务栏的深色/浅色外观自动换色。
+- 可设置没有媒体播放时自动隐藏；此时歌词同步与布局轮询定时器一并停止。
+- 同时有多个播放器时，可在右键菜单里指定跟踪哪一个。
+- 通知区域有一个托盘图标，任务栏放不下组件或组件被隐藏时仍可打开菜单。
 - 监视 Windows 任务栏变化，并在 Explorer 重启后尝试重新挂接组件。
 
 ## 显示布局
@@ -21,7 +25,7 @@
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/39170e90-c827-454b-97fe-f72b75d06370" />
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/68f5bed3-bc58-409a-b910-d75494a29516" />
 
-歌词只在**完整信息**布局下显示：另外两种布局不放歌词按钮，也放不下歌词面板。切换布局不会改变已经打开的歌词开关，切回完整信息布局时会重新显示歌词。
+歌词只在**完整**布局下显示：另外两种布局不放歌词按钮，也放不下歌词面板。切换布局不会改变已经打开的歌词开关，切回完整布局时会重新显示歌词。
 
 ## 系统要求
 
@@ -77,6 +81,7 @@ dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj -c Release -r 
 1. 启动支持 Windows 媒体会话的播放器并开始播放。
 2. 启动组件；它会自动检测任务栏并读取当前媒体会话。
 3. 右键任务栏组件切换布局、选择歌词来源、调整歌词偏移、选择任务栏或退出。
+4. 鼠标停在组件上时按住 Ctrl 滚动滚轮，可以按 ±0.2 秒微调当前歌曲的歌词偏移，不必反复打开菜单。
 
 ### 本地歌词
 
@@ -112,10 +117,9 @@ LRC 时间戳用于跟随播放进度；同一时间戳的连续两行会作为�
 
 组件设置位于 `%LOCALAPPDATA%\TaskbarMusicControls`：
 
-- `display-mode.txt`：显示布局。
-- `lyrics-source.txt`：歌词来源选择（`Automatic`、`Netease` 或 `Lrclib`）。
-- `taskbar.txt`：选中的任务栏/显示器设备 ID。
-- `Lyrics\Offsets`：按歌曲保存的歌词偏移。
+- `settings.json`：全部设置——`DisplayMode`（显示布局）、`TaskbarDeviceId`（选中的任务栏/显示器）、`LyricsPreferLocal`（本地文件是否优先）与 `LyricsOrder`（`NeteaseFirst` 或 `LrclibFirst`）、`HideWhenIdle`（无播放时是否隐藏）与 `PlayerId`（跟踪的播放器，空表示跟随系统当前会话）。位置相关的是 `Block`（图标左侧还是右侧的空档）、`Alignment`（贴该空档的哪一端）和 `TaskbarCentered`（自动探测到的 Windows 任务栏图标对齐方式，决定是否存在左侧空档）。单曲锁定源与歌词偏移保存在该曲的 `.meta.json` 里。
+  这是唯一的设置文件：读写都只走它。文件里没有 `Version` 时会被忽略并使用默认值（暂不提供旧格式迁移）。
+- `Lyrics\Cache\<hash>.meta.json`：单曲状态——歌词偏移、该曲锁定的歌词源、上次使用的源与匹配度。
 - `Lyrics\Cache`：在线歌词缓存。
 - `Logs\playback-sync.log`：播放位置校正诊断日志（仅 Debug 构建）。
 - `Logs\taskbar-layout.log`：任务栏布局探测诊断日志（除错误信息外仅 Debug 构建；错误行在所有构建中都会记录）。

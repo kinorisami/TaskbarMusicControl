@@ -46,6 +46,29 @@ internal sealed class PlaybackClock
         PlaybackSyncDiagnostics.Write($"reset reason={reason}");
     }
 
+    /// <summary>
+    /// Moves the clock after the widget asked the player to jump. The anchor is
+    /// placed optimistically and the next timeline snapshot is accepted again,
+    /// otherwise a stale "before the seek" sample would drag the position back.
+    /// </summary>
+    public void SeekTo(TimeSpan position)
+    {
+        lock (_gate)
+        {
+            if (position < TimeSpan.Zero)
+                position = TimeSpan.Zero;
+            if (_duration > TimeSpan.Zero && position > _duration)
+                position = _duration;
+
+            SetAnchor(position, _isPlaying, Stopwatch.GetTimestamp());
+            _lastAcceptedTimelineTime = DateTimeOffset.MinValue;
+            _lastAcceptedReceivedUtc = DateTimeOffset.MinValue;
+            _lastAcceptedRawPosition = position;
+        }
+
+        PlaybackSyncDiagnostics.Write($"seek-to positionMs={position.TotalMilliseconds:F0}");
+    }
+
     public void Synchronize(
         GlobalSystemMediaTransportControlsSessionTimelineProperties timeline,
         bool isPlaying,

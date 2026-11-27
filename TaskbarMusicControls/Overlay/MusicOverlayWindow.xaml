@@ -13,10 +13,21 @@
         UseLayoutRounding="True">
 
     <Window.Resources>
+        <!-- Taskbar colours. ApplyTheme() replaces these values when the taskbar
+             switches between its light and dark appearance. -->
+        <SolidColorBrush x:Key="TextPrimary" Color="#202124"/>
+        <SolidColorBrush x:Key="TextSecondary" Color="#50545A"/>
+        <SolidColorBrush x:Key="IconForeground" Color="#30343A"/>
+        <SolidColorBrush x:Key="Accent" Color="#167C69"/>
+        <SolidColorBrush x:Key="HoverOverlay" Color="#18000000"/>
+        <SolidColorBrush x:Key="PressedOverlay" Color="#28000000"/>
+        <SolidColorBrush x:Key="PlayOverlay" Color="#22000000"/>
+        <SolidColorBrush x:Key="PlayOverlayHover" Color="#44000000"/>
+        <SolidColorBrush x:Key="PlayOverlayPressed" Color="#66000000"/>
         <Style x:Key="TransportButton" TargetType="Button">
             <Setter Property="Width" Value="24"/>
             <Setter Property="Height" Value="32"/>
-            <Setter Property="Foreground" Value="#30343A"/>
+            <Setter Property="Foreground" Value="{DynamicResource IconForeground}"/>
             <Setter Property="Background" Value="#01000000"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -40,13 +51,13 @@
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="ButtonBorder"
                                         Property="Background"
-                                        Value="#18000000"/>
+                                        Value="{DynamicResource HoverOverlay}"/>
                             </Trigger>
 
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="ButtonBorder"
                                         Property="Background"
-                                        Value="#28000000"/>
+                                        Value="{DynamicResource PressedOverlay}"/>
                             </Trigger>
 
                             <Trigger Property="IsEnabled" Value="False">
@@ -61,12 +72,12 @@
         <Style x:Key="PlayButton"
                TargetType="Button"
                BasedOn="{StaticResource TransportButton}">
-            <Setter Property="Foreground" Value="#167C69"/>
+            <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
             <Setter Property="FontSize" Value="18"/>
         </Style>
 
         <Style x:Key="HoverPlaybackButtonStyle" TargetType="Button">
-            <Setter Property="Background" Value="#22000000"/>
+            <Setter Property="Background" Value="{DynamicResource PlayOverlay}"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -82,65 +93,26 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonSurface" Property="Background" Value="#44000000"/>
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource PlayOverlayHover}"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonSurface" Property="Background" Value="#66000000"/>
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource PlayOverlayPressed}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
         </Style>
+
     </Window.Resources>
 
     <Border x:Name="RootBorder"
             Background="Transparent"
             BorderBrush="Transparent"
             BorderThickness="0"
-            Padding="0">
-
-        <Border.ContextMenu>
-            <ContextMenu Closed="OnContextMenuClosed">
-                <MenuItem Header="Full layout"
-                          Tag="FullDetails"
-                          IsCheckable="True"
-                          IsChecked="True"
-                          Click="OnDisplayModeClick"/>
-                <MenuItem Header="Cover and controls"
-                          Tag="CoverAndControls"
-                          IsCheckable="True"
-                          Click="OnDisplayModeClick"/>
-                <MenuItem Header="Cover only (hover to play/pause)"
-                          Tag="CoverOnly"
-                          IsCheckable="True"
-                          Click="OnDisplayModeClick"/>
-                <MenuItem Header="Lyric source">
-                    <MenuItem Header="Automatic (local, NetEase, LRCLIB)"
-                              Tag="Automatic" Click="OnLyricsSourceClick"/>
-                    <MenuItem Header="NetEase Music"
-                              Tag="Netease" Click="OnLyricsSourceClick"/>
-                    <MenuItem Header="LRCLIB"
-                              Tag="Lrclib" Click="OnLyricsSourceClick"/>
-                </MenuItem>
-                <MenuItem Header="Lyric timing (this song)">
-                    <MenuItem Header="No adjustment" Tag="0" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Advance 0.2 s" Tag="-200" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Advance 0.5 s" Tag="-500" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Advance 1 s" Tag="-1000" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Advance 2 s" Tag="-2000" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Delay 0.2 s" Tag="200" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Delay 0.5 s" Tag="500" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Delay 1 s" Tag="1000" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Delay 2 s" Tag="2000" Click="OnLyricsOffsetClick"/>
-                    <MenuItem Header="Delay 6 s" Tag="6000" Click="OnLyricsOffsetClick"/>
-                </MenuItem>
-                <MenuItem x:Name="TaskbarMenu" Header="Taskbar"/>
-                <Separator/>
-                <MenuItem Header="Exit Taskbar Music Widget"
-                          Click="OnExitClick"/>
-            </ContextMenu>
-        </Border.ContextMenu>
+            Padding="0"
+            MouseRightButtonUp="OnRootRightButtonUp"
+            MouseWheel="OnRootMouseWheel">
 
         <Grid>
             <!-- Horizontal layout -->
@@ -157,7 +129,9 @@
                         Height="48"
                         VerticalAlignment="Center"
                         MouseEnter="OnArtworkMouseEnter"
-                        MouseLeave="OnArtworkMouseLeave">
+                        MouseLeave="OnArtworkMouseLeave"
+                        MouseLeftButtonUp="OnArtworkMouseUp"
+                        MouseDown="OnArtworkMouseDown">
 
                     <Border.Background>
                         <SolidColorBrush Color="#26353D"/>
@@ -191,9 +165,19 @@
                     </Grid>
                 </Border>
 
-                <!-- Track metadata -->
+                <!-- Track metadata. The transparent border is the hover target
+                     for the lyrics layout: it covers the whole text area, not
+                     only the height of the text itself. -->
+                <!-- #01FFFFFF instead of Transparent: this window is layered, and
+                     the system hit-tests a layered window per pixel, so fully
+                     transparent pixels never reach WPF. One step of alpha is
+                     invisible but makes the whole text area hoverable. -->
+                <Border x:Name="ContentArea"
+                        Grid.Column="1"
+                        Background="#01FFFFFF"
+                        MouseEnter="OnContentMouseEnter"
+                        MouseLeave="OnContentMouseLeave">
                 <Grid x:Name="MetadataPanel"
-                      Grid.Column="1"
                       Margin="8,0,10,0"
                       VerticalAlignment="Center"
                       ClipToBounds="True"
@@ -201,35 +185,35 @@
 
                     <StackPanel x:Name="MetadataTextPanel" VerticalAlignment="Center">
                         <Canvas x:Name="TitleCanvas" Height="18" ClipToBounds="True">
-                            <StackPanel Orientation="Horizontal">
+                            <StackPanel x:Name="TitlePanel" Orientation="Horizontal">
                                 <StackPanel.RenderTransform>
                                     <TranslateTransform x:Name="TitleTranslation"/>
                                 </StackPanel.RenderTransform>
                                 <TextBlock x:Name="TitlePrimary"
                                            Text="No media playing"
-                                           Foreground="#202124"
+                                           Foreground="{DynamicResource TextPrimary}"
                                            FontWeight="SemiBold"
                                            FontSize="13"/>
                                 <Border x:Name="TitleSpacer" Width="32" Visibility="Collapsed"/>
                                 <TextBlock x:Name="TitleSecondary"
-                                           Foreground="#202124"
+                                           Foreground="{DynamicResource TextPrimary}"
                                            FontWeight="SemiBold"
                                            FontSize="13"
                                            Visibility="Collapsed"/>
                             </StackPanel>
                         </Canvas>
                         <Canvas x:Name="ArtistCanvas" Height="16" ClipToBounds="True">
-                            <StackPanel Orientation="Horizontal">
+                            <StackPanel x:Name="ArtistPanel" Orientation="Horizontal">
                                 <StackPanel.RenderTransform>
                                     <TranslateTransform x:Name="ArtistTranslation"/>
                                 </StackPanel.RenderTransform>
                                 <TextBlock x:Name="ArtistPrimary"
                                            Text="Start playback in a media app"
-                                           Foreground="#50545A"
+                                           Foreground="{DynamicResource TextSecondary}"
                                            FontSize="11"/>
                                 <Border x:Name="ArtistSpacer" Width="32" Visibility="Collapsed"/>
                                 <TextBlock x:Name="ArtistSecondary"
-                                           Foreground="#50545A"
+                                           Foreground="{DynamicResource TextSecondary}"
                                            FontSize="11"
                                            Visibility="Collapsed"/>
                             </StackPanel>
@@ -243,56 +227,124 @@
                           Visibility="Collapsed">
                         <Canvas x:Name="LyricsOriginalCanvas" Height="18" ClipToBounds="True"
                                 VerticalAlignment="Center">
-                            <TextBlock x:Name="LyricsOriginalText" Foreground="#202124"
+                            <TextBlock x:Name="LyricsOriginalText" Foreground="{DynamicResource TextPrimary}"
                                        FontWeight="SemiBold" FontSize="13"/>
                         </Canvas>
                         <Canvas x:Name="LyricsTranslationCanvas" Height="16" ClipToBounds="True"
                                 VerticalAlignment="Bottom" Visibility="Collapsed">
-                            <TextBlock x:Name="LyricsTranslationText" Foreground="#50545A"
+                            <TextBlock x:Name="LyricsTranslationText" Foreground="{DynamicResource TextSecondary}"
                                        FontSize="11"/>
                         </Canvas>
                     </Grid>
                 </Grid>
+                </Border>
 
-                <!-- Playback controls -->
-                <StackPanel x:Name="PlaybackControls"
-                            Grid.Column="2"
-                            Orientation="Horizontal"
-                            VerticalAlignment="Center">
+                <!-- Playback controls. The other layouts dock this strip in the
+                     right column; the lyrics layout moves it over the text area,
+                     where it drops down as a drawer with its own background. -->
+                <Border x:Name="ControlsReveal"
+                        Grid.Column="2"
+                        ClipToBounds="True"
+                        MouseEnter="OnContentMouseEnter"
+                        MouseLeave="OnContentMouseLeave">
+                    <Grid x:Name="DrawerLayout" VerticalAlignment="Center">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
 
-                    <Button x:Name="LyricsButton"
-                            Style="{StaticResource TransportButton}"
-                            Width="24"
-                            Content="♫"
-                            FontSize="12"
-                            AutomationProperties.Name="Toggle lyrics"
-                            Click="OnLyricsClick"/>
+                        <Grid Grid.Row="0">
+                            <TextBlock x:Name="ProgressText"
+                                       HorizontalAlignment="Left"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextSecondary}"
+                                       FontSize="11"
+                                       Visibility="Collapsed"/>
+                            <StackPanel x:Name="PlaybackControls"
+                                        Orientation="Horizontal"
+                                        VerticalAlignment="Center">
 
-                    <Button x:Name="PreviousButton"
-                            Style="{StaticResource TransportButton}"
-                            Width="22"
-                            Content="◂"
-                            AutomationProperties.Name="Previous track"
-                            Click="OnPreviousClick"
-                            IsEnabled="False"/>
+                            <Button x:Name="CopyButton"
+                                    Style="{StaticResource TransportButton}"
+                                    Width="24"
+                                    Content="&#xE8C8;"
+                                    FontFamily="Segoe Fluent Icons"
+                                    FontSize="12"
+                                    Visibility="Collapsed"
+                                    AutomationProperties.Name="Copy the current lyric"
+                                    Click="OnCopyClick"/>
 
-                    <Button x:Name="ToggleButton"
-                            Style="{StaticResource PlayButton}"
-                            Width="30"
-                            Height="30"
-                            Content="▶"
-                            AutomationProperties.Name="Play or pause"
-                            Click="OnToggleClick"
-                            IsEnabled="False"/>
+                            <Button x:Name="TranslationButton"
+                                    Style="{StaticResource TransportButton}"
+                                    Width="24"
+                                    Content="译"
+                                    FontSize="11"
+                                    Visibility="Collapsed"
+                                    AutomationProperties.Name="Toggle translation"
+                                    Click="OnTranslationClick"/>
 
-                    <Button x:Name="NextButton"
-                            Style="{StaticResource TransportButton}"
-                            Width="22"
-                            Content="▸"
-                            AutomationProperties.Name="Next track"
-                            Click="OnNextClick"
-                            IsEnabled="False"/>
-                </StackPanel>
+                            <Button x:Name="LyricsButton"
+                                    Style="{StaticResource TransportButton}"
+                                    Width="24"
+                                    Content="♫"
+                                    FontSize="12"
+                                    AutomationProperties.Name="Toggle lyrics"
+                                    Click="OnLyricsClick"/>
+
+                            <Button x:Name="PreviousButton"
+                                    Style="{StaticResource TransportButton}"
+                                    Width="22"
+                                    Content="◂"
+                                    AutomationProperties.Name="Previous track"
+                                    Click="OnPreviousClick"
+                                    IsEnabled="False"/>
+
+                            <Button x:Name="ToggleButton"
+                                    Style="{StaticResource PlayButton}"
+                                    Width="30"
+                                    Height="30"
+                                    Content="▶"
+                                    AutomationProperties.Name="Play or pause"
+                                    Click="OnToggleClick"
+                                    IsEnabled="False"/>
+
+                            <Button x:Name="NextButton"
+                                    Style="{StaticResource TransportButton}"
+                                    Width="22"
+                                    Content="▸"
+                                    AutomationProperties.Name="Next track"
+                                    Click="OnNextClick"
+                                    IsEnabled="False"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- The hit area is taller than the 3 px bar so the bar is
+                             comfortable to click; #01FFFFFF keeps it hit-testable
+                             on a layered window. -->
+                        <Border x:Name="ProgressHit"
+                                Grid.Row="1"
+                                Height="12"
+                                Margin="0,2,0,0"
+                                Background="#01FFFFFF"
+                                Visibility="Collapsed"
+                                MouseLeftButtonDown="OnProgressMouseDown"
+                                MouseMove="OnProgressMouseMove"
+                                MouseLeftButtonUp="OnProgressMouseUp"
+                                LostMouseCapture="OnProgressLostCapture">
+                            <Border x:Name="ProgressTrack"
+                                    Height="3"
+                                    VerticalAlignment="Center"
+                                    CornerRadius="1.5"
+                                    Background="{DynamicResource PlayOverlay}">
+                                <Border x:Name="ProgressFill"
+                                        HorizontalAlignment="Left"
+                                        Width="0"
+                                        CornerRadius="1.5"
+                                        Background="{DynamicResource Accent}"/>
+                            </Border>
+                        </Border>
+                    </Grid>
+                </Border>
             </Grid>
 
         </Grid>

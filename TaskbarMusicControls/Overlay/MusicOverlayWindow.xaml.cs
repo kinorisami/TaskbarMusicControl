@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -9,13 +10,38 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using TaskbarMusicControls.Interop;
 using TaskbarMusicControls.Services;
 
 namespace TaskbarMusicControls.Overlay;
 
+/// <summary>
+/// Which block of free space on the taskbar the widget uses. With centred icons
+/// there are two: one left of the task buttons and one right of them.
+/// </summary>
+public enum WidgetBlock
+{
+    /// <summary>The space right of the task buttons, up to the notification area.</summary>
+    Right,
+    /// <summary>The space left of the task buttons, up to the taskbar's left edge.</summary>
+    Left
+}
+
+/// <summary>Which end of the chosen block the widget is anchored to.</summary>
+public enum WidgetAlignment
+{
+    Right,
+    Left
+}
+
 internal enum WidgetDisplayMode
 {
-    FullDetails,
+    /// <summary>
+    /// The default layout: the lyrics fill the widget, the metadata replaces them
+    /// when the song has none, and the playback controls stay out of the way
+    /// until the pointer is over the widget, then slide down from the top edge.
+    /// </summary>
+    Full,
     CoverAndControls,
     CoverOnly
 }
@@ -50,8 +76,24 @@ public partial class MusicOverlayWindow : Window
     private const uint SwpNoActivate = 0x0010;
     private static readonly nint HwndTop = 0;
     private const double DefaultWidth = 350;
-    private const double MinimumWidth = 50;
+    /// <summary>
+    /// The cover-only layout is exactly as wide as the artwork; anything wider
+    /// leaves a transparent seam on both sides of it, which shows as the taskbar
+    /// between the widget edge and the cover.
+    /// </summary>
+    private const double MinimumWidth = 48;
     private const double TransportLayoutWidth = 130;
+
+    /// <summary>
+    /// How far the control drawer drops down. It covers the whole text area so
+    /// the line underneath never peeks out under the drawer.
+    /// </summary>
+    private double DrawerRevealHeight => Height > 0 ? Height : 60;
+
+    private static readonly Brush AccentBrush = CreateFrozenBrush(0xFF, 0x16, 0x7C, 0x69);
+    private static readonly Brush InactiveBrush = CreateFrozenBrush(0xFF, 0x30, 0x34, 0x3A);
+    private const string CopyGlyph = "\uE8C8";
+    private const string CopiedGlyph = "\uE73E";
 
     private nint _taskbarHandle;
     private nint _parentTaskbarHandle;
@@ -65,8 +107,50 @@ public partial class MusicOverlayWindow : Window
     private TimeSpan _lyricsOffset;
     private TimeSpan _lastLyricsPosition;
     private bool _hoverPlaybackOnlyMode;
-    private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
-    private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
+    private bool _hoverControlsMode;
+    private bool _drawerOpen;
+    private readonly DispatcherTimer _drawerHideTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(150)
+    };
+    private readonly DispatcherTimer _progressTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(250)
+    };
+    private TimeSpan _progressPosition;
+    private TimeSpan _progressDuration;
+    private bool _progressPlaying;
+    private long _progressAnchorTimestamp;
+    private bool _canSeek;
+    private bool _seeking;
+    private double _seekFraction;
+    private bool _showTranslation = true;
+    private readonly DispatcherTimer _copyFeedbackTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(700)
+    };
+    private WidgetDisplayMode _displayMode = WidgetDisplayMode.Full;
+    private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
+    private LyricsSource? _lyricsSource;
+    private bool _lyricsLocked;
+    private bool _startWithWindows;
+    private bool _hideWhenIdle;
+    private int _pauseHideSeconds;
+    private bool _manualHidden;
+    private bool _hidden;
+    private string _hiddenReason = "";
+    private IReadOnlyList<MediaPlayerOption> _players = Array.Empty<MediaPlayerOption>();
+    private string? _activePlayerId;
+    private string _pinnedPlayerId = "";
+
+    private bool _lightTheme = true;
+    private bool _themeRefreshQueued;
+    private WidgetBlock _block = WidgetBlock.Right;
+    private WidgetAlignment _alignment = WidgetAlignment.Right;
+    private bool _taskbarCentered;
+    private Rect _taskbarBounds;
+    private Rect _availableBounds;
+    private Rect _leftBlockBounds;
     private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();
     private string _selectedTaskbarDeviceId = "";
     private double _lastAvailableWidth = DefaultWidth;
@@ -84,9 +168,42 @@ public partial class MusicOverlayWindow : Window
     public event EventHandler? NextRequested;
     public event Action<object?, bool>? LyricsModeChanged;
     internal event Action<object?, WidgetDisplayMode>? DisplayModeChanged;
-    internal event Action<object?, LyricsSourcePreference>? LyricsSourceChanged;
+    internal event Action<object?, LyricsSourceSettings>? LyricsSourceSettingsChanged;
+    internal event EventHandler? LyricsRefetchRequested;
+    internal event Action<object?, bool>? LyricsLockChanged;
+    internal event Action<object?, bool>? TranslationChanged;
+    internal event Action<object?, bool>? StartupChanged;
+    internal event Action<object?, bool>? HideWhenIdleChanged;
+    internal event Action<object?, bool>? ManualHiddenChanged;
+    internal event Action<object?, int>? PauseHideChanged;
+    internal event Action<object?, string?>? PlayerSelectedChanged;
+
+    /// <summary>
+    /// The players that currently expose a media session, and the one being
+    /// shown. With a single player there is nothing to choose, so the menu omits
+    /// the list entirely.
+    /// </summary>
+    internal void SetPlayerOptions(
+        IReadOnlyList<MediaPlayerOption> players,
+        string? activePlayerId,
+        string pinnedPlayerId)
+    {
+        _players = players;
+        _activePlayerId = activePlayerId;
+        _pinnedPlayerId = pinnedPlayerId;
+    }
     internal event Action<object?, TimeSpan>? LyricsOffsetChanged;
     internal event Action<object?, string>? TaskbarSelectionChanged;
+    internal event Action<object?, TimeSpan>? SeekRequested;
+    internal event EventHandler? PlayerActivateRequested;
+    internal event Action<object?, WidgetAlignment>? AlignmentChanged;
+    internal event Action<object?, WidgetBlock>? BlockChanged;
+
+    /// <summary>
+    /// Raised when the taskbar icons switch between centred and left aligned,
+    /// which decides whether a second block exists at all.
+    /// </summary>
+    internal event Action<object?, bool>? TaskbarCenteredChanged;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -96,6 +213,84 @@ public partial class MusicOverlayWindow : Window
         InitializeComponent();
         SourceInitialized += OnSourceInitialized;
         IsVisibleChanged += OnIsVisibleChanged;
+        Closed += OnWindowClosed;
+        _drawerHideTimer.Tick += OnDrawerHideTimerTick;
+        _progressTimer.Tick += (_, _) => RenderProgress();
+        _copyFeedbackTimer.Tick += (_, _) =>
+        {
+            _copyFeedbackTimer.Stop();
+            CopyButton.Content = CopyGlyph;
+        };
+        ApplyTaskbarTheme();
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+    }
+
+    private void OnWindowClosed(object? sender, EventArgs e) =>
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+
+    private void OnUserPreferenceChanged(
+        object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+    {
+        if (_themeRefreshQueued)
+            return;
+
+        _themeRefreshQueued = true;
+        Dispatcher.BeginInvoke(() =>
+        {
+            _themeRefreshQueued = false;
+            ApplyTaskbarTheme();
+        });
+    }
+
+    /// <summary>
+    /// The widget draws no background of its own, so its text sits directly on
+    /// the taskbar and has to follow the taskbar's light or dark appearance.
+    /// Windows keeps that setting in SystemUsesLightTheme; a preference change -
+    /// switching the system theme - re-applies it.
+    /// </summary>
+    internal void ApplyTaskbarTheme()
+    {
+        var light = true;
+        try
+        {
+            var value = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                "SystemUsesLightTheme",
+                1);
+            light = value is not int flag || flag != 0;
+        }
+        catch (Exception)
+        {
+            // A missing key means the default appearance; light is the default.
+        }
+
+        _lightTheme = light;
+        TaskbarLayoutDiagnostics.Write($"theme: {(light ? "light" : "dark")} taskbar");
+        SetThemeBrush("TextPrimary", light ? 0xFF202124u : 0xFFEDEFF2u);
+        SetThemeBrush("TextSecondary", light ? 0xFF50545Au : 0xFFA8AEB8u);
+        SetThemeBrush("IconForeground", light ? 0xFF30343Au : 0xFFE3E6EAu);
+        SetThemeBrush("Accent", light ? 0xFF167C69u : 0xFF4CC2A8u);
+        SetThemeBrush("HoverOverlay", light ? 0x18000000u : 0x22FFFFFFu);
+        SetThemeBrush("PressedOverlay", light ? 0x28000000u : 0x33FFFFFFu);
+        SetThemeBrush("PlayOverlay", light ? 0x22000000u : 0x33FFFFFFu);
+        SetThemeBrush("PlayOverlayHover", light ? 0x44000000u : 0x4DFFFFFFu);
+        SetThemeBrush("PlayOverlayPressed", light ? 0x66000000u : 0x66FFFFFFu);
+        SetLyricsMode(_lyricsMode);
+    }
+
+    private void SetThemeBrush(string key, uint argb)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(
+            (byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
+        brush.Freeze();
+        Resources[key] = brush;
+    }
+
+    private static SolidColorBrush CreateFrozenBrush(byte a, byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(a, r, g, b));
+        brush.Freeze();
+        return brush;
     }
 
     public void UpdateMedia(string title, string artist, byte[]? artworkBytes)
@@ -182,7 +377,8 @@ public partial class MusicOverlayWindow : Window
         bool isPlaying,
         bool canPlayPause,
         bool canGoPrevious,
-        bool canGoNext)
+        bool canGoNext,
+        bool canSeek)
     {
         ToggleButton.Content = isPlaying ? "Ⅱ" : "▶";
         ToggleButton.IsEnabled = canPlayPause;
@@ -192,7 +388,19 @@ public partial class MusicOverlayWindow : Window
         ToggleButton.SetValue(
             AutomationProperties.NameProperty,
             isPlaying ? "Pause" : "Play");
+        _canSeek = canSeek;
+        UpdateProgressCursor();
     }
+
+    /// <summary>
+    /// The bar is only clickable when the player accepts a seek *and* a total
+    /// length is known - without one there is nothing to map the click onto.
+    /// </summary>
+    private bool ProgressInteractive => _canSeek && _progressDuration > TimeSpan.Zero;
+
+    private void UpdateProgressCursor() =>
+        ProgressHit.Cursor = ProgressInteractive ? System.Windows.Input.Cursors.Hand
+            : System.Windows.Input.Cursors.Arrow;
 
     internal void UpdateLyrics(LyricsDocument? lyrics, TimeSpan position)
     {
@@ -203,13 +411,17 @@ public partial class MusicOverlayWindow : Window
             lyricPosition = TimeSpan.Zero;
         var current = lyrics?.At(lyricPosition);
         var originalFrame = current?.Original;
-        var translationFrame = current?.Translation;
+        var translationFrame = _showTranslation ? current?.Translation : null;
         var original = originalFrame?.Text;
         var translation = translationFrame?.Text;
         var hasTranslation = !string.IsNullOrWhiteSpace(translation);
         var hasLine = _lyricsMode && !string.IsNullOrWhiteSpace(original);
         LyricsPanel.Visibility = hasLine ? Visibility.Visible : Visibility.Collapsed;
         MetadataTextPanel.Visibility = hasLine ? Visibility.Collapsed : Visibility.Visible;
+        // Nothing to copy before the first line of the song, and nothing to
+        // toggle when the source delivered no translation at all.
+        CopyButton.IsEnabled = hasLine;
+        TranslationButton.IsEnabled = lyrics is { TranslationLines.Count: > 0 };
         if (!hasLine) return;
 
         var originalChanged = original != _renderedOriginal || originalFrame!.Time != _renderedOriginalTime;
@@ -228,6 +440,10 @@ public partial class MusicOverlayWindow : Window
             : null;
         LyricsOriginalText.Text = _renderedOriginal;
         LyricsTranslationText.Text = _renderedTranslation ?? "";
+        if (originalChanged)
+            AnimateLineEnter(LyricsOriginalText);
+        if (translationChanged)
+            AnimateLineEnter(LyricsTranslationText);
         LyricsOriginalCanvas.VerticalAlignment = hasTranslation
             ? VerticalAlignment.Top
             : VerticalAlignment.Center;
@@ -242,56 +458,95 @@ public partial class MusicOverlayWindow : Window
     internal void SetLyricsMode(bool enabled)
     {
         _lyricsMode = enabled;
-        LyricsButton.Foreground = enabled
-            ? new SolidColorBrush(Color.FromRgb(22, 124, 105))
-            : new SolidColorBrush(Color.FromRgb(48, 52, 58));
+        // The brush comes from the theme resources, so it stays readable when the
+        // taskbar switches appearance.
+        LyricsButton.Foreground = (Brush)Resources[
+            enabled ? "Accent" : "IconForeground"];
     }
 
     internal void SetDisplayMode(WidgetDisplayMode mode)
     {
         _displayMode = mode;
-        var width = GetEffectiveWidth(_lastAvailableWidth);
+        var width = GetEffectiveWidth(_lastAvailableWidth, _lastAvailableWidth);
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
         ApplyResponsiveLayout(width);
-        UpdateDisplayModeMenuChecks();
     }
 
     public TaskbarPositionResult PositionInAvailableArea(
         nint taskbarHandle,
         Rect taskbarBounds,
-        Rect availableBounds)
+        Rect availableBounds,
+        Rect leftBlockBounds = default,
+        bool centered = false)
     {
+        if (centered != _taskbarCentered)
+        {
+            _taskbarCentered = centered;
+            TaskbarCenteredChanged?.Invoke(this, centered);
+        }
+
         if (availableBounds.IsEmpty || availableBounds.Width <= 0 ||
             taskbarBounds.Height <= 0)
             return TaskbarPositionResult.NoSpace;
 
         var dpi = GetDpiScale(taskbarHandle);
-        var availableWidth = availableBounds.Width / dpi.DpiScaleX;
+        _leftBlockBounds = leftBlockBounds;
+        _availableBounds = availableBounds;
+
+        // Two blocks of free space exist when the taskbar icons are centred: one
+        // left of the task list and one right of it. The block setting picks one
+        // and the alignment setting picks the end of it - the taskbar corner or
+        // the icon edge on the left, the icon edge or the notification area on
+        // the right.
+        var useLeftBlock = _block == WidgetBlock.Left &&
+            !leftBlockBounds.IsEmpty &&
+            leftBlockBounds.Width >= MinimumWidth * dpi.DpiScaleX;
+        var block = useLeftBlock ? leftBlockBounds : availableBounds;
+
+        var availableWidth = block.Width / dpi.DpiScaleX;
+        var previousWidth = _lastAvailableWidth;
         _lastAvailableWidth = availableWidth;
-        var width = GetEffectiveWidth(availableWidth);
+        var width = GetEffectiveWidth(availableWidth, previousWidth);
         if (width < MinimumWidth)
             return TaskbarPositionResult.NoSpace;
 
+        TaskbarLayoutDiagnostics.Write(
+            $"place: width={width:F1} (current {Width:F1}) layoutMode={_responsiveLayoutWidth:F1} " +
+            $"block={(useLeftBlock ? "left" : "right")} align={_alignment} " +
+            $"avail={availableWidth:F1} prev={previousWidth:F1} " +
+            $"mode={_displayMode} effective={GetEffectiveMode(availableWidth, previousWidth)}");
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
         if (Math.Abs(_responsiveLayoutWidth - width) > 0.5)
             ApplyResponsiveLayout(width);
         _taskbarHandle = taskbarHandle;
+        _taskbarBounds = taskbarBounds;
 
         var physicalWidth = width * dpi.DpiScaleX;
         var physicalHeight = Height * dpi.DpiScaleY;
-        var physicalLeft = availableBounds.Right - physicalWidth;
+        var physicalLeft = _alignment == WidgetAlignment.Left
+            ? block.Left
+            : block.Right - physicalWidth;
         var physicalTop = taskbarBounds.Top +
             (taskbarBounds.Height - physicalHeight) / 2;
 
-        Left = physicalLeft / dpi.DpiScaleX;
-        Top = physicalTop / dpi.DpiScaleY;
+        // Left/Top are deliberately not assigned: WPF would send its own
+        // SetWindowPos for them - with screen coordinates, which a child window
+        // does not use - and the window would move twice and repaint twice. A
+        // child window is placed by the explicit SetWindowPos below only.
         var handle = new WindowInteropHelper(this).Handle;
         if (handle != 0)
         {
             if (!AttachToTaskbar(handle, taskbarHandle))
                 return TaskbarPositionResult.NotAttached;
+
+            // The available area can change without moving the widget - its right
+            // edge is what matters, and that stayed the same when the task list
+            // grew on the other side. Repositioning anyway repaints the whole
+            // layered window, which shows up as a flash.
+            if (!NeedsReposition(handle, physicalLeft, physicalTop, physicalWidth, physicalHeight))
+                return TaskbarPositionResult.Positioned;
 
             var rect = new NativeRect(
                 (int)Math.Round(physicalLeft),
@@ -312,10 +567,28 @@ public partial class MusicOverlayWindow : Window
         return TaskbarPositionResult.Positioned;
     }
 
+    /// <summary>
+    /// Compares the target rectangle with the one the window already has. The
+    /// widget is anchored to the right edge of the available area, so a lot of
+    /// "layout changed" events do not move it at all.
+    /// </summary>
+    private static bool NeedsReposition(
+        nint handle, double left, double top, double width, double height)
+    {
+        if (!GetWindowRect(handle, out var current))
+            return true;
+
+        return current.Left != (int)Math.Round(left) ||
+               current.Top != (int)Math.Round(top) ||
+               current.Right != (int)Math.Round(left + width) ||
+               current.Bottom != (int)Math.Round(top + height);
+    }
+
     private void ApplyResponsiveLayout(double width)
     {
         _responsiveLayoutWidth = width;
-        var effectiveMode = GetEffectiveMode(width);
+        var effectiveMode = GetEffectiveMode(width, width);
+        _hoverControlsMode = effectiveMode == WidgetDisplayMode.Full;
 
         if (effectiveMode == WidgetDisplayMode.CoverOnly)
         {
@@ -324,7 +597,7 @@ public partial class MusicOverlayWindow : Window
             Artwork.HorizontalAlignment = HorizontalAlignment.Center;
             MetadataPanel.Visibility = Visibility.Collapsed;
             MetadataColumn.Width = new GridLength(0);
-            ControlsColumn.Width = new GridLength(0);
+            DockControlsInColumn(0);
             PlaybackControls.Visibility = Visibility.Collapsed;
             SetHoverPlaybackOnlyMode(true);
             return;
@@ -345,33 +618,431 @@ public partial class MusicOverlayWindow : Window
             LyricsButton.Width = 0;
             MetadataPanel.Visibility = Visibility.Collapsed;
             MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
-            ControlsColumn.Width = new GridLength(74);
+            DockControlsInColumn(74);
             return;
         }
 
+        // Full: no separate controls column; the lyrics use the whole width and
+        // the strip becomes a drawer over the text area.
         LyricsButton.Visibility = Visibility.Visible;
         LyricsButton.Width = 24;
         MetadataPanel.Visibility = Visibility.Visible;
         MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
-        ControlsColumn.Width = new GridLength(112);
+        ControlsColumn.Width = new GridLength(0);
+        PlaceControlsAsDrawer();
         ScheduleMarqueeRefresh();
     }
 
-    private WidgetDisplayMode GetEffectiveMode(double availableWidth)
+    /// <summary>
+    /// Puts the control strip back into its own column on the right, where every
+    /// layout except the lyrics one shows it.
+    /// </summary>
+    private void DockControlsInColumn(double columnWidth)
+    {
+        ControlsColumn.Width = new GridLength(columnWidth);
+        Grid.SetColumn(ControlsReveal, 2);
+        ControlsReveal.BeginAnimation(FrameworkElement.HeightProperty, null);
+        // The drawer fades itself out when it closes; without this the docked
+        // strip would inherit that zero opacity and stay invisible.
+        ControlsReveal.BeginAnimation(UIElement.OpacityProperty, null);
+        ControlsReveal.Opacity = 1;
+        ControlsReveal.Height = double.NaN;
+        ControlsReveal.Background = null;
+        ControlsReveal.BorderThickness = new Thickness(0);
+        ControlsReveal.VerticalAlignment = VerticalAlignment.Stretch;
+        DrawerLayout.Margin = new Thickness(0);
+        PlaybackControls.HorizontalAlignment = HorizontalAlignment.Stretch;
+        PlaybackControls.Margin = new Thickness(0);
+        ProgressText.Visibility = Visibility.Collapsed;
+        ProgressHit.Visibility = Visibility.Collapsed;
+        CopyButton.Visibility = Visibility.Collapsed;
+        TranslationButton.Visibility = Visibility.Collapsed;
+        MetadataPanel.BeginAnimation(UIElement.OpacityProperty, null);
+        MetadataPanel.Opacity = 1;
+        _seeking = false;
+        _drawerOpen = false;
+        _drawerHideTimer.Stop();
+        _progressTimer.Stop();
+    }
+
+    /// <summary>
+    /// Moves the control strip over the text area, where it drops down from the
+    /// top edge as a drawer with its own background.
+    /// </summary>
+    private void PlaceControlsAsDrawer()
+    {
+        Grid.SetColumn(ControlsReveal, 1);
+        // No surface of its own: the taskbar shows through, so the drawer always
+        // matches the taskbar colour whatever the wallpaper does to it. The
+        // lyrics are faded out while it is open, so nothing shows through.
+        ControlsReveal.Background = null;
+        ControlsReveal.BorderThickness = new Thickness(0);
+        ControlsReveal.VerticalAlignment = VerticalAlignment.Top;
+        DrawerLayout.Margin = new Thickness(10, 0, 10, 0);
+        PlaybackControls.HorizontalAlignment = HorizontalAlignment.Right;
+        PlaybackControls.Margin = new Thickness(0);
+        ProgressText.Visibility = Visibility.Visible;
+        ProgressHit.Visibility = Visibility.Visible;
+        CopyButton.Visibility = Visibility.Visible;
+        TranslationButton.Visibility = Visibility.Visible;
+        UpdateTranslationButton();
+        UpdateProgressCursor();
+        RenderProgress();
+        ApplyDrawerRestState();
+    }
+
+    /// <summary>
+    /// Puts the drawer back in place without animating: open where the pointer
+    /// already is, closed everywhere else.
+    /// </summary>
+    private void ApplyDrawerRestState()
+    {
+        _drawerOpen = _hoverControlsMode &&
+            (ContentArea.IsMouseOver || ControlsReveal.IsMouseOver || IsContextMenuOpen);
+        ControlsReveal.BeginAnimation(FrameworkElement.HeightProperty, null);
+        ControlsReveal.BeginAnimation(UIElement.OpacityProperty, null);
+        ControlsReveal.Height = _drawerOpen ? DrawerRevealHeight : 0;
+        ControlsReveal.Opacity = 1;
+
+        // The drawer has no background, so the lyrics are hidden while it covers
+        // them instead of showing through it.
+        MetadataPanel.BeginAnimation(UIElement.OpacityProperty, null);
+        MetadataPanel.Opacity = _drawerOpen ? 0 : 1;
+        if (_drawerOpen)
+        {
+            _progressTimer.Start();
+            RenderProgress();
+        }
+        else
+        {
+            _progressTimer.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Feeds the progress bar with the position the widget last received. The
+    /// media service only publishes a state when something changes, so the
+    /// overlay advances the bar itself between those updates.
+    /// </summary>
+    internal void UpdateProgress(TimeSpan position, TimeSpan duration, bool isPlaying)
+    {
+        _progressPosition = position;
+        _progressDuration = duration;
+        _progressPlaying = isPlaying;
+        _progressAnchorTimestamp = Stopwatch.GetTimestamp();
+        UpdateProgressCursor();
+        RenderProgress();
+    }
+
+    private void RenderProgress()
+    {
+        var position = _seeking ? PreviewPosition() : CurrentProgressPosition();
+        if (_progressDuration > TimeSpan.Zero)
+        {
+            ProgressText.Text =
+                $"{FormatPlaybackTime(position)} / {FormatPlaybackTime(_progressDuration)}";
+            var fraction = Math.Clamp(
+                position.TotalSeconds / _progressDuration.TotalSeconds, 0, 1);
+            ProgressFill.Width = Math.Max(0, ProgressTrack.ActualWidth * fraction);
+            return;
+        }
+
+        // The player reports no length (an empty timeline), so only the elapsed
+        // time can be shown - the bar itself would have nothing to measure.
+        ProgressText.Text = FormatPlaybackTime(position);
+        ProgressFill.Width = 0;
+    }
+
+    private TimeSpan CurrentProgressPosition()
+    {
+        var position = _progressPosition;
+        if (_progressPlaying)
+            position += Stopwatch.GetElapsedTime(_progressAnchorTimestamp);
+        if (_progressDuration > TimeSpan.Zero && position > _progressDuration)
+            position = _progressDuration;
+        return position < TimeSpan.Zero ? TimeSpan.Zero : position;
+    }
+
+    private static string FormatPlaybackTime(TimeSpan value) =>
+        $"{(int)value.TotalMinutes}:{value.Seconds:00}";
+
+    private TimeSpan PreviewPosition() => TimeSpan.FromTicks(
+        (long)(_progressDuration.Ticks * Math.Clamp(_seekFraction, 0, 1)));
+
+    private void OnProgressMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!ProgressInteractive)
+            return;
+
+        _seeking = true;
+        // Stop the interpolation so the preview is not overwritten mid-drag.
+        _progressTimer.Stop();
+        _seekFraction = FractionAt(e.GetPosition(ProgressHit).X);
+        RenderProgress();
+        ProgressHit.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void OnProgressMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_seeking)
+            return;
+
+        _seekFraction = FractionAt(e.GetPosition(ProgressHit).X);
+        RenderProgress();
+    }
+
+    private void OnProgressMouseUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!_seeking)
+            return;
+
+        _seekFraction = FractionAt(e.GetPosition(ProgressHit).X);
+        CommitSeek();
+        if (ProgressHit.IsMouseCaptured)
+            ProgressHit.ReleaseMouseCapture();
+    }
+
+    private void OnProgressLostCapture(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_seeking)
+            return;
+
+        // Capture can be lost without a mouse-up (the context menu, alt-tab).
+        // Keep the preview position: the user still asked to go there.
+        CommitSeek();
+    }
+
+    private double FractionAt(double x)
+    {
+        var width = ProgressHit.ActualWidth;
+        return width <= 0 ? 0 : Math.Clamp(x / width, 0, 1);
+    }
+
+    private void CommitSeek()
+    {
+        _seeking = false;
+        _progressTimer.Start();
+        var target = PreviewPosition();
+        // Move the widget right away; the player may take a moment to catch up.
+        _progressPosition = target;
+        _progressAnchorTimestamp = Stopwatch.GetTimestamp();
+        RenderProgress();
+        SeekRequested?.Invoke(this, target);
+    }
+
+    private void OnCopyClick(object sender, RoutedEventArgs e)
+    {
+        var text = CurrentLyricText();
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception)
+        {
+            // The clipboard can be held open by another process; doing nothing
+            // is better than crashing the widget.
+            return;
+        }
+
+        CopyButton.Content = CopiedGlyph;
+        _copyFeedbackTimer.Stop();
+        _copyFeedbackTimer.Start();
+    }
+
+    /// <summary>
+    /// What the copy button puts on the clipboard: the line on screen, so the
+    /// translation is only included while it is displayed.
+    /// </summary>
+    private string CurrentLyricText()
+    {
+        if (string.IsNullOrWhiteSpace(_renderedOriginal))
+            return "";
+        return string.IsNullOrWhiteSpace(_renderedTranslation)
+            ? _renderedOriginal
+            : _renderedOriginal + Environment.NewLine + _renderedTranslation;
+    }
+
+    /// <summary>
+    /// Whether the translation line is shown. Kept in settings.json, so the
+    /// choice survives a restart.
+    /// </summary>
+    internal void SetShowTranslation(bool enabled)
+    {
+        _showTranslation = enabled;
+        UpdateTranslationButton();
+        if (_lyrics is not null)
+            UpdateLyrics(_lyrics, _lastLyricsPosition);
+    }
+
+    private void OnTranslationClick(object sender, RoutedEventArgs e)
+    {
+        SetShowTranslation(!_showTranslation);
+        TranslationChanged?.Invoke(this, _showTranslation);
+    }
+
+    internal void SetStartWithWindows(bool enabled) => _startWithWindows = enabled;
+
+    internal void SetHideWhenIdle(bool enabled) => _hideWhenIdle = enabled;
+
+    internal void SetPauseHideSeconds(int seconds) => _pauseHideSeconds = seconds;
+
+    internal void SetManualHidden(bool hidden) => _manualHidden = hidden;
+
+    /// <summary>
+    /// The service owns why the widget is hidden - by hand, no media, paused for
+    /// a while - and hands the answer down with a word for the menu. The window
+    /// only turns transparent: it is a child of the taskbar and stays attached, so
+    /// it has to be revealed rather than recreated.
+    /// </summary>
+    internal void SetHidden(bool hidden, string reason)
+    {
+        _hiddenReason = reason;
+        if (_hidden == hidden)
+            return;
+
+        _hidden = hidden;
+        Opacity = hidden ? 0 : 1;
+        IsHitTestVisible = !hidden;
+        if (hidden)
+            SetDrawerOpen(false);
+    }
+
+    private void UpdateTranslationButton() =>
+        TranslationButton.Foreground = _showTranslation ? AccentBrush : InactiveBrush;
+
+    private void SetDrawerOpen(bool open)
+    {
+        if (!_hoverControlsMode || _drawerOpen == open)
+            return;
+
+        TaskbarLayoutDiagnostics.Write($"drawer {(open ? "open" : "close")}");
+        _drawerOpen = open;
+        if (open)
+        {
+            _progressTimer.Start();
+            // The bar is sized from the track width, which is only known after
+            // the drawer has been laid out.
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RenderProgress));
+        }
+        else
+        {
+            _progressTimer.Stop();
+        }
+
+        var easing = new CubicEase
+        {
+            EasingMode = open ? EasingMode.EaseOut : EasingMode.EaseIn
+        };
+        ControlsReveal.BeginAnimation(
+            FrameworkElement.HeightProperty,
+            new DoubleAnimation(open ? DrawerRevealHeight : 0,
+                TimeSpan.FromMilliseconds(open ? 180 : 140))
+            {
+                EasingFunction = easing,
+                FillBehavior = FillBehavior.HoldEnd
+            });
+
+        // The height alone makes the panel slide over the lyrics as a hard edge;
+        // fading it in at the same time softens that line.
+        ControlsReveal.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(open ? 1 : 0, TimeSpan.FromMilliseconds(open ? 160 : 120))
+            {
+                EasingFunction = easing,
+                FillBehavior = FillBehavior.HoldEnd
+            });
+
+        // The lyrics step aside as the drawer arrives, so the drawer itself needs
+        // no background to hide them.
+        MetadataPanel.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(open ? 0 : 1, TimeSpan.FromMilliseconds(open ? 120 : 140))
+            {
+                EasingFunction = easing,
+                FillBehavior = FillBehavior.HoldEnd
+            });
+    }
+
+    private void OnContentMouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        _drawerHideTimer.Stop();
+        SetDrawerOpen(true);
+    }
+
+    private void OnContentMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (IsContextMenuOpen)
+            return;
+
+        // The text area and the drawer are siblings, so moving onto the open
+        // drawer leaves the text area for a moment. The short delay turns that
+        // into a hand-over instead of a flicker.
+        _drawerHideTimer.Stop();
+        _drawerHideTimer.Start();
+    }
+
+    private void OnDrawerHideTimerTick(object? sender, EventArgs e)
+    {
+        _drawerHideTimer.Stop();
+        if (ContentArea.IsMouseOver || ControlsReveal.IsMouseOver || IsContextMenuOpen)
+            return;
+        SetDrawerOpen(false);
+    }
+
+    /// <summary>
+    /// How far the width has to move past a threshold before the layout switches.
+    /// The shell animates the task list right at those thresholds, and without
+    /// the margin the widget flips between layouts several times in a row.
+    /// </summary>
+    private const double ModeHysteresis = 16;
+
+    private WidgetDisplayMode GetEffectiveMode(double availableWidth, double previousWidth)
     {
         var mode = _displayMode;
+        var current = _responsiveLayoutWidth >= 0
+            ? ModeAtWidth(_responsiveLayoutWidth, mode)
+            : mode;
+
+        // The margin only applies to small steps, which is what the shell's
+        // animation produces. A real change - a different block, a window
+        // closing - goes past the thresholds immediately instead of needing a
+        // second refresh to grow out of the compact layout.
+        var damped = Math.Abs(availableWidth - previousWidth) <= ModeHysteresis;
+
+        var coverOnlyCeiling = damped && current == WidgetDisplayMode.CoverOnly
+            ? TransportLayoutWidth + ModeHysteresis
+            : TransportLayoutWidth;
+        var fullCeiling = !damped
+            ? DefaultWidth
+            : current == WidgetDisplayMode.Full
+                ? DefaultWidth - ModeHysteresis
+                : DefaultWidth + ModeHysteresis;
+
         // If the available width cannot fit the full layout at its natural size,
         // drop straight to cover-and-controls instead of squeezing the full layout.
-        if (mode == WidgetDisplayMode.FullDetails && availableWidth < DefaultWidth)
+        if (mode == WidgetDisplayMode.Full && availableWidth < fullCeiling)
             mode = WidgetDisplayMode.CoverAndControls;
-        if (availableWidth < TransportLayoutWidth)
+        if (availableWidth < coverOnlyCeiling)
             mode = WidgetDisplayMode.CoverOnly;
         return mode;
     }
 
-    private double GetEffectiveWidth(double availableWidth)
+    private static WidgetDisplayMode ModeAtWidth(double width, WidgetDisplayMode mode)
     {
-        var preferred = GetEffectiveMode(availableWidth) switch
+        if (width < TransportLayoutWidth)
+            return WidgetDisplayMode.CoverOnly;
+        if (mode == WidgetDisplayMode.Full && width < DefaultWidth)
+            return WidgetDisplayMode.CoverAndControls;
+        return mode;
+    }
+
+    private double GetEffectiveWidth(double availableWidth, double previousWidth)
+    {
+        var preferred = GetEffectiveMode(availableWidth, previousWidth) switch
         {
             WidgetDisplayMode.CoverOnly => MinimumWidth,
             WidgetDisplayMode.CoverAndControls => TransportLayoutWidth,
@@ -380,154 +1051,401 @@ public partial class MusicOverlayWindow : Window
         return Math.Min(preferred, availableWidth);
     }
 
-    private void UpdateDisplayModeMenuChecks()
+    // Command ids for the native context menu.
+    private const int CmdDisplayModeBase = 100;
+    private const int CmdLyricsLock = 200;
+    private const int CmdLyricsRefetch = 201;
+    private const int CmdPreferLocal = 202;
+    private const int CmdOrderNeteaseFirst = 203;
+    private const int CmdOrderLrclibFirst = 204;
+    private const int CmdOffsetBase = 300;
+    private const int CmdOffsetReset = 310;
+    private const int CmdTaskbarBase = 400;
+    private const int CmdStartWithWindows = 500;
+    private const int CmdHideWhenIdle = 502;
+    private const int CmdManualHide = 503;
+    private const int CmdPauseHideBase = 520;
+    private const int CmdPlayerFollow = 700;
+    private const int CmdPlayerBase = 701;
+    private const int CmdExit = 501;
+    private const int CmdAlignLeft = 600;
+    private const int CmdAlignRight = 601;
+    private const int CmdBlockLeft = 610;
+    private const int CmdBlockRight = 611;
+
+    private static readonly int[] OffsetDeltas = [-200, -1000, 200, 1000];
+
+    private bool _menuOpen;
+
+    private bool IsContextMenuOpen => _menuOpen;
+
+    /// <summary>
+    /// Opens the widget's own context menu from outside the widget - the tray
+    /// icon - using the tray's message window as the menu owner. The owner has to
+    /// belong to this thread, which it does.
+    /// </summary>
+    internal void ShowContextMenuAt(nint owner, int screenX, int screenY)
     {
-        foreach (var item in RootBorder.ContextMenu?.Items.OfType<MenuItem>() ?? [])
+        var command = ShowContextMenu(screenX, screenY, owner);
+        if (command != 0)
+            DispatchMenuCommand(command);
+    }
+
+    private void OnRootRightButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != System.Windows.Input.MouseButton.Right)
+            return;
+
+        e.Handled = true;
+        var position = PointToScreen(e.GetPosition(this));
+        var command = ShowContextMenu((int)position.X, (int)position.Y);
+        if (command != 0)
+            DispatchMenuCommand(command);
+    }
+
+    /// <summary>
+    /// Reopening a native menu after a command makes it flash, so repeated
+    /// adjustment uses the wheel instead: Ctrl + wheel moves the lyric offset by
+    /// 0.2 s per notch while the pointer is over the widget.
+    /// </summary>
+    private void OnRootMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if ((System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) == 0)
+            return;
+
+        e.Handled = true;
+        var step = Math.Sign(e.Delta) * 200;
+        ApplyOffset(_lyricsOffset + TimeSpan.FromMilliseconds(step));
+    }
+
+    /// <summary>
+    /// Builds the menu from the current state and shows it. The menu is rebuilt
+    /// every time instead of being kept in sync, which is what makes the native
+    /// menu cheaper than the WPF one.
+    /// </summary>
+    private int ShowContextMenu(int screenX, int screenY, nint? ownerOverride = null)
+    {
+        using var menu = new NativeMenu();
+
+        var layout = menu.AddSubmenu("Layout");
+        AddDisplayMode(layout, "Full (controls on hover)", WidgetDisplayMode.Full);
+        AddDisplayMode(layout, "Cover and controls", WidgetDisplayMode.CoverAndControls);
+        AddDisplayMode(layout, "Cover only (hover to play/pause)", WidgetDisplayMode.CoverOnly);
+
+        var source = menu.AddSubmenu("Lyric source");
+        source.AddItem(LockText(), CmdLyricsLock, _lyricsLocked, _lyricsSource is not null);
+        source.AddSeparator();
+        source.AddItem("Refresh lyrics (this song)", CmdLyricsRefetch);
+        source.AddSeparator();
+        source.AddItem("Local files first", CmdPreferLocal,
+            _lyricsSourceSettings.PreferLocal, !_lyricsLocked);
+        source.AddItem("NetEase → LRCLIB", CmdOrderNeteaseFirst,
+            _lyricsSourceSettings.Order == LyricsOnlineOrder.NeteaseFirst, !_lyricsLocked);
+        source.AddItem("LRCLIB → NetEase", CmdOrderLrclibFirst,
+            _lyricsSourceSettings.Order == LyricsOnlineOrder.LrclibFirst, !_lyricsLocked);
+
+        var timing = menu.AddSubmenu("Lyric timing (this song)");
+        timing.AddItem(OffsetText(), 0, isEnabled: false);
+        timing.AddSeparator();
+        for (var i = 0; i < OffsetDeltas.Length; i++)
         {
-            if (Enum.TryParse<WidgetDisplayMode>(item.Tag?.ToString(), out var mode))
-                item.IsChecked = mode == _displayMode;
+            var delta = OffsetDeltas[i];
+            var label = delta < 0 ? $"Earlier {delta / 1000.0:+0.0;-0.0} s"
+                : $"Later {delta / 1000.0:+0.0;-0.0} s";
+            timing.AddItem(label, CmdOffsetBase + i);
+        }
+
+        timing.AddSeparator();
+        timing.AddItem("Reset (0.0 s)", CmdOffsetReset, isEnabled: _lyricsOffset != TimeSpan.Zero);
+
+        if (_taskbarOptions.Count > 0)
+        {
+            var taskbar = menu.AddSubmenu("Taskbar");
+            for (var i = 0; i < _taskbarOptions.Count; i++)
+            {
+                var option = _taskbarOptions[i];
+                var label = option.IsPrimary ? $"{option.DisplayName} (primary)" : option.DisplayName;
+                taskbar.AddItem(label, CmdTaskbarBase + i,
+                    string.Equals(option.DeviceId, _selectedTaskbarDeviceId, StringComparison.Ordinal));
+            }
+        }
+
+        // Only centred taskbar icons leave a second block to choose from; with
+        // left aligned icons there is a single block and nothing to pick.
+        if (_taskbarCentered)
+        {
+            var block = menu.AddSubmenu("Block");
+            block.AddItem("Left of the task buttons", CmdBlockLeft, _block == WidgetBlock.Left);
+            block.AddItem("Right of the task buttons", CmdBlockRight, _block == WidgetBlock.Right);
+        }
+
+        if (_players.Count > 1)
+        {
+            var player = menu.AddSubmenu("Player");
+            player.AddItem("Follow the current player", CmdPlayerFollow,
+                _pinnedPlayerId.Length == 0);
+            for (var i = 0; i < _players.Count; i++)
+            {
+                var option = _players[i];
+                player.AddItem(
+                    option.DisplayName,
+                    CmdPlayerBase + i,
+                    string.Equals(option.Id, _pinnedPlayerId, StringComparison.Ordinal));
+            }
+        }
+
+        var alignment = menu.AddSubmenu("Alignment");
+        alignment.AddItem("Left", CmdAlignLeft, _alignment == WidgetAlignment.Left);
+        alignment.AddItem("Right", CmdAlignRight, _alignment == WidgetAlignment.Right);
+
+        var visibility = menu.AddSubmenu("Visibility");
+        if (_hidden)
+            visibility.AddItem($"Hidden: {_hiddenReason}", 0, isEnabled: false);
+        visibility.AddItem("Hide the widget", CmdManualHide, _manualHidden);
+        visibility.AddItem("Hide when nothing is playing", CmdHideWhenIdle, _hideWhenIdle);
+        var paused = visibility.AddSubmenu("Hide when paused");
+        for (var i = 0; i < PauseHideSeconds.Length; i++)
+            AddPauseHideOption(paused, PauseHideTexts[i], i);
+
+        menu.AddSeparator();
+        menu.AddItem("Start with Windows", CmdStartWithWindows, _startWithWindows);
+        menu.AddItem("Exit Taskbar Music Widget", CmdExit);
+
+        // The menu must be owned by a window of this thread: TrackPopupMenuEx
+        // posts its messages to the owner, and an owner in another process never
+        // receives them, which cancels the menu immediately.
+        var owner = ownerOverride ?? (_nativeHandle != 0 ? _nativeHandle : _taskbarHandle);
+        _menuOpen = true;
+        try
+        {
+            return NativeMenu.Show(menu.Handle, owner, screenX, screenY);
+        }
+        finally
+        {
+            _menuOpen = false;
+
+            // The pointer may have left while the menu held the mouse, so the
+            // hover states are restored from where it is now - the same thing the
+            // WPF menu's Closed handler used to do.
+            if (_hoverPlaybackOnlyMode)
+            {
+                HoverPlaybackButton.Visibility = Artwork.IsMouseOver
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+
+            if (!ContentArea.IsMouseOver && !ControlsReveal.IsMouseOver)
+                SetDrawerOpen(false);
         }
     }
 
-    private void OnDisplayModeClick(object sender, RoutedEventArgs e)
-    {
-        if (sender is not MenuItem item ||
-            !Enum.TryParse<WidgetDisplayMode>(item.Tag?.ToString(), out var mode))
-            return;
+    /// <summary>The pause timeouts the menu offers; index 0 is off.</summary>
+    private static readonly int[] PauseHideSeconds = [0, 15, 30, 60, 300];
+    private static readonly string[] PauseHideTexts =
+        ["Off", "15 seconds", "30 seconds", "1 minute", "5 minutes"];
 
-        SetDisplayMode(mode);
-        DisplayModeChanged?.Invoke(this, mode);
-    }
+    private void AddPauseHideOption(NativeMenu menu, string text, int index) =>
+        menu.AddItem(text, CmdPauseHideBase + index, _pauseHideSeconds == PauseHideSeconds[index]);
 
-    internal void SetLyricsSource(LyricsSourcePreference preference)
+    private void AddDisplayMode(NativeMenu menu, string text, WidgetDisplayMode mode) =>
+        menu.AddItem(text, CmdDisplayModeBase + (int)mode, _displayMode == mode);
+
+    private void DispatchMenuCommand(int command)
     {
-        _lyricsSourcePreference = preference;
-        var sourceMenu = RootBorder.ContextMenu?.Items.OfType<MenuItem>()
-            .FirstOrDefault(menu => menu.Header?.ToString() == "Lyric source");
-        foreach (var item in sourceMenu?.Items.OfType<MenuItem>() ?? [])
+        if (command >= CmdDisplayModeBase && command < CmdDisplayModeBase + 16)
         {
-            item.IsCheckable = true;
-            item.IsChecked = Enum.TryParse<LyricsSourcePreference>(item.Tag?.ToString(), out var value) &&
-                value == preference;
+            var mode = (WidgetDisplayMode)(command - CmdDisplayModeBase);
+            SetDisplayMode(mode);
+            DisplayModeChanged?.Invoke(this, mode);
+            return;
+        }
+
+        if (command >= CmdOffsetBase && command < CmdOffsetBase + OffsetDeltas.Length)
+        {
+            ApplyOffset(_lyricsOffset + TimeSpan.FromMilliseconds(OffsetDeltas[command - CmdOffsetBase]));
+            return;
+        }
+
+        if (command >= CmdTaskbarBase && command < CmdTaskbarBase + _taskbarOptions.Count)
+        {
+            var deviceId = _taskbarOptions[command - CmdTaskbarBase].DeviceId;
+            if (!string.Equals(deviceId, _selectedTaskbarDeviceId, StringComparison.Ordinal))
+            {
+                _selectedTaskbarDeviceId = deviceId;
+                TaskbarSelectionChanged?.Invoke(this, deviceId);
+            }
+
+            return;
+        }
+
+        switch (command)
+        {
+            case CmdLyricsLock:
+                LyricsLockChanged?.Invoke(this, !_lyricsLocked);
+                break;
+            case CmdLyricsRefetch:
+                LyricsRefetchRequested?.Invoke(this, EventArgs.Empty);
+                break;
+            case CmdPreferLocal:
+                ChangeSourceSettings(_lyricsSourceSettings with
+                {
+                    PreferLocal = !_lyricsSourceSettings.PreferLocal
+                });
+                break;
+            case CmdOrderNeteaseFirst:
+                ChangeSourceSettings(_lyricsSourceSettings with
+                {
+                    Order = LyricsOnlineOrder.NeteaseFirst
+                });
+                break;
+            case CmdOrderLrclibFirst:
+                ChangeSourceSettings(_lyricsSourceSettings with
+                {
+                    Order = LyricsOnlineOrder.LrclibFirst
+                });
+                break;
+            case CmdOffsetReset:
+                ApplyOffset(TimeSpan.Zero);
+                break;
+            case CmdBlockLeft:
+                ChangeBlock(WidgetBlock.Left);
+                break;
+            case CmdBlockRight:
+                ChangeBlock(WidgetBlock.Right);
+                break;
+            case CmdAlignLeft:
+                ChangeAlignment(WidgetAlignment.Left);
+                break;
+            case CmdAlignRight:
+                ChangeAlignment(WidgetAlignment.Right);
+                break;
+            case CmdStartWithWindows:
+                _startWithWindows = !_startWithWindows;
+                StartupChanged?.Invoke(this, _startWithWindows);
+                break;
+            case CmdPlayerFollow:
+                PlayerSelectedChanged?.Invoke(this, null);
+                break;
+            case >= CmdPlayerBase and < CmdPlayerBase + 100:
+                var index = command - CmdPlayerBase;
+                if (index < _players.Count)
+                    PlayerSelectedChanged?.Invoke(this, _players[index].Id);
+                break;
+            case CmdHideWhenIdle:
+                _hideWhenIdle = !_hideWhenIdle;
+                HideWhenIdleChanged?.Invoke(this, _hideWhenIdle);
+                break;
+            case CmdManualHide:
+                _manualHidden = !_manualHidden;
+                ManualHiddenChanged?.Invoke(this, _manualHidden);
+                break;
+            case >= CmdPauseHideBase and < CmdPauseHideBase + 10:
+                _pauseHideSeconds = PauseHideSeconds[command - CmdPauseHideBase];
+                PauseHideChanged?.Invoke(this, _pauseHideSeconds);
+                break;
+            case CmdExit:
+                ExitWidget();
+                break;
         }
     }
 
-    private void OnLyricsSourceClick(object sender, RoutedEventArgs e)
+    private void ChangeSourceSettings(LyricsSourceSettings settings)
     {
-        if (sender is not MenuItem item ||
-            !Enum.TryParse<LyricsSourcePreference>(item.Tag?.ToString(), out var preference))
+        if (_lyricsSourceSettings == settings)
             return;
 
-        SetLyricsSource(preference);
-        LyricsSourceChanged?.Invoke(this, preference);
+        _lyricsSourceSettings = settings;
+        LyricsSourceSettingsChanged?.Invoke(this, settings);
     }
+
+    private void ApplyOffset(TimeSpan offset)
+    {
+        SetLyricsOffset(offset);
+        LyricsOffsetChanged?.Invoke(this, _lyricsOffset);
+    }
+
+    private string LockText() => _lyricsSource switch
+    {
+        null => "Lock source",
+        var source => _lyricsLocked
+            ? $"Locked to {SourceName(source)}"
+            : $"Lock to {SourceName(source)}"
+    };
+
+    private static string SourceName(LyricsSource? source) => source switch
+    {
+        LyricsSource.Netease => "NetEase Music",
+        LyricsSource.Lrclib => "LRCLIB",
+        LyricsSource.Local => "Local file",
+        _ => "-"
+    };
+
+    private string OffsetText()
+    {
+        var seconds = _lyricsOffset.TotalSeconds;
+        var text = seconds == 0
+            ? "0.0 s"
+            : seconds.ToString("+0.0;-0.0", CultureInfo.InvariantCulture) + " s";
+        return $"Current: {text}";
+    }
+
+    /// <summary>How far the lyric offset can be pushed in either direction.</summary>
+    private const int MaxOffsetMs = 15000;
+
+    internal void SetLyricsSourceSettings(LyricsSourceSettings settings) => _lyricsSourceSettings = settings;
+
+    internal void SetLyricsStatus(LyricsSource? source) => _lyricsSource = source;
+
+    internal void SetLyricsLock(bool locked, LyricsSource? source)
+    {
+        _lyricsLocked = locked;
+        if (source is not null)
+            _lyricsSource = source;
+    }
+
+    internal void SetBlock(WidgetBlock block) => _block = block;
+
+    internal void SetAlignment(WidgetAlignment alignment) => _alignment = alignment;
+
+    private void ChangeBlock(WidgetBlock block)
+    {
+        if (_block == block)
+            return;
+
+        _block = block;
+        Reposition();
+        BlockChanged?.Invoke(this, block);
+    }
+
+    private void ChangeAlignment(WidgetAlignment alignment)
+    {
+        if (_alignment == alignment)
+            return;
+
+        _alignment = alignment;
+        Reposition();
+        AlignmentChanged?.Invoke(this, alignment);
+    }
+
+    private void Reposition() => PositionInAvailableArea(
+        _taskbarHandle, _taskbarBounds, _availableBounds, _leftBlockBounds,
+        _taskbarCentered);
 
     internal void SetLyricsOffset(TimeSpan offset)
     {
-        _lyricsOffset = offset;
-        var offsetMenu = RootBorder.ContextMenu?.Items.OfType<MenuItem>()
-            .FirstOrDefault(menu => menu.Header?.ToString() == "Lyric timing (this song)");
-        foreach (var item in offsetMenu?.Items.OfType<MenuItem>() ?? [])
-        {
-            item.IsCheckable = true;
-            item.IsChecked = int.TryParse(item.Tag?.ToString(), out var milliseconds) &&
-                milliseconds == (int)offset.TotalMilliseconds;
-        }
+        _lyricsOffset = TimeSpan.FromMilliseconds(
+            Math.Clamp((int)offset.TotalMilliseconds, -MaxOffsetMs, MaxOffsetMs));
         if (_lyrics is not null)
             UpdateLyrics(_lyrics, _lastLyricsPosition);
     }
 
-    private void OnLyricsOffsetClick(object sender, RoutedEventArgs e)
+    internal void SetTaskbarOptions(IReadOnlyList<TaskbarOption> options, string selectedDeviceId)
     {
-        if (sender is not MenuItem item ||
-            !int.TryParse(item.Tag?.ToString(), out var milliseconds))
-            return;
-
-        var offset = TimeSpan.FromMilliseconds(milliseconds);
-        SetLyricsOffset(offset);
-        LyricsOffsetChanged?.Invoke(this, offset);
-    }
-
-    internal void SetTaskbarOptions(
-        IReadOnlyList<TaskbarOption> options,
-        string selectedDeviceId)
-    {
-        var optionsChanged = !TaskbarOptionsEqual(_taskbarOptions, options);
         _taskbarOptions = options;
         _selectedTaskbarDeviceId = selectedDeviceId;
-        if (optionsChanged)
-            RebuildTaskbarMenu();
-        else
-            UpdateTaskbarMenuChecks();
     }
 
-    internal void SetTaskbarSelection(string selectedDeviceId)
-    {
-        _selectedTaskbarDeviceId = selectedDeviceId;
-        UpdateTaskbarMenuChecks();
-    }
-
-    private void RebuildTaskbarMenu()
-    {
-        if (TaskbarMenu is null)
-            return;
-
-        TaskbarMenu.Visibility = _taskbarOptions.Count > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        TaskbarMenu.Items.Clear();
-        foreach (var option in _taskbarOptions)
-        {
-            var item = new MenuItem
-            {
-                Header = option.IsPrimary
-                    ? $"{option.DisplayName} (primary)"
-                    : option.DisplayName,
-                Tag = option.DeviceId,
-                IsCheckable = true,
-                IsChecked = string.Equals(option.DeviceId, _selectedTaskbarDeviceId,
-                    StringComparison.Ordinal)
-            };
-            item.Click += OnTaskbarClick;
-            TaskbarMenu.Items.Add(item);
-        }
-    }
-
-    private void OnTaskbarClick(object sender, RoutedEventArgs e)
-    {
-        if (sender is not MenuItem { Tag: string deviceId })
-            return;
-
-        _selectedTaskbarDeviceId = deviceId;
-        UpdateTaskbarMenuChecks();
-        TaskbarSelectionChanged?.Invoke(this, deviceId);
-    }
-
-    private void UpdateTaskbarMenuChecks()
-    {
-        foreach (var item in TaskbarMenu?.Items.OfType<MenuItem>() ?? [])
-        {
-            item.IsChecked = string.Equals(item.Tag?.ToString(), _selectedTaskbarDeviceId,
-                StringComparison.Ordinal);
-        }
-    }
-
-    private static bool TaskbarOptionsEqual(
-        IReadOnlyList<TaskbarOption> left,
-        IReadOnlyList<TaskbarOption> right)
-    {
-        if (left.Count != right.Count)
-            return false;
-
-        for (var i = 0; i < left.Count; i++)
-        {
-            if (!string.Equals(left[i].DeviceId, right[i].DeviceId, StringComparison.Ordinal) ||
-                !string.Equals(left[i].DisplayName, right[i].DisplayName, StringComparison.Ordinal) ||
-                left[i].IsPrimary != right[i].IsPrimary)
-                return false;
-        }
-        return true;
-    }
+    internal void SetTaskbarSelection(string selectedDeviceId) => _selectedTaskbarDeviceId = selectedDeviceId;
 
     private void SetHoverPlaybackOnlyMode(bool enabled)
     {
@@ -546,6 +1464,46 @@ public partial class MusicOverlayWindow : Window
             HoverPlaybackButton.Visibility = Visibility.Visible;
     }
 
+    /// <summary>Left click on the cover brings the player's window forward.</summary>
+    private void OnArtworkMouseUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != System.Windows.Input.MouseButton.Left)
+            return;
+
+        PlayerActivateRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Middle click copies "title - artist".</summary>
+    private void OnArtworkMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != System.Windows.Input.MouseButton.Middle)
+            return;
+        if (_currentTitle is "No media playing" || _currentTitle is "Start playback in a media app")
+            return;
+
+        var text = string.IsNullOrWhiteSpace(_currentArtist)
+            ? _currentTitle
+            : $"{_currentTitle} - {_currentArtist}";
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        // A short dip in opacity is the only feedback that fits in 48 px.
+        Artwork.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(1, 0.5, TimeSpan.FromMilliseconds(90))
+            {
+                AutoReverse = true,
+                FillBehavior = FillBehavior.Stop
+            });
+        e.Handled = true;
+    }
+
     private void OnArtworkMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
         // Opening the context menu steals mouse capture and raises MouseLeave even
@@ -554,16 +1512,6 @@ public partial class MusicOverlayWindow : Window
         if (!IsContextMenuOpen)
             HoverPlaybackButton.Visibility = Visibility.Collapsed;
     }
-
-    private void OnContextMenuClosed(object sender, RoutedEventArgs e)
-    {
-        if (_hoverPlaybackOnlyMode)
-            HoverPlaybackButton.Visibility = Artwork.IsMouseOver
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-    }
-
-    private bool IsContextMenuOpen => RootBorder.ContextMenu?.IsOpen == true;
 
     private void OnHoverPlaybackClick(object sender, RoutedEventArgs e) =>
         ToggleRequested?.Invoke(this, EventArgs.Empty);
@@ -625,9 +1573,9 @@ public partial class MusicOverlayWindow : Window
             MetadataPanel.ActualWidth <= 0)
             return;
 
-        UpdateMarquee(TitleCanvas, TitlePrimary, TitleSpacer, TitleSecondary,
+        UpdateMarquee(TitleCanvas, TitlePanel, TitlePrimary, TitleSpacer, TitleSecondary,
             TitleTranslation, _currentTitle);
-        UpdateMarquee(ArtistCanvas, ArtistPrimary, ArtistSpacer, ArtistSecondary,
+        UpdateMarquee(ArtistCanvas, ArtistPanel, ArtistPrimary, ArtistSpacer, ArtistSecondary,
             ArtistTranslation, _currentArtist);
         RefreshLyricsMarquees();
     }
@@ -641,18 +1589,23 @@ public partial class MusicOverlayWindow : Window
         if (!IsLoaded || LyricsPanel.Visibility != Visibility.Visible) return;
         if (refreshOriginal)
             UpdateLyricsMarquee(LyricsOriginalCanvas, LyricsOriginalText, _renderedOriginal,
-                _renderedTranslation is null, _originalTimeRemaining);
+                true, _originalTimeRemaining);
         if (refreshTranslation && _renderedTranslation is not null)
             UpdateLyricsMarquee(LyricsTranslationCanvas, LyricsTranslationText,
-                _renderedTranslation, false, _translationTimeRemaining);
+                _renderedTranslation, true, _translationTimeRemaining);
     }
 
     private void OnIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (IsVisible)
+        {
             ScheduleMarqueeRefresh();
+        }
         else
+        {
             StopMarqueeAnimations();
+            _progressTimer.Stop();
+        }
     }
 
     private void StopMarqueeAnimations()
@@ -661,6 +1614,34 @@ public partial class MusicOverlayWindow : Window
         StopTextMarquee(ArtistTranslation);
         StopTextMarquee(LyricsOriginalText.RenderTransform as TranslateTransform);
         StopTextMarquee(LyricsTranslationText.RenderTransform as TranslateTransform);
+    }
+
+    /// <summary>
+    /// Slides a new lyric line up into place instead of swapping it in. The
+    /// X axis of the same transform belongs to the marquee, so only Y is used.
+    /// </summary>
+    private static void AnimateLineEnter(TextBlock textBlock)
+    {
+        if (textBlock.RenderTransform is not TranslateTransform transform)
+        {
+            transform = new TranslateTransform();
+            textBlock.RenderTransform = transform;
+        }
+
+        transform.BeginAnimation(
+            TranslateTransform.YProperty,
+            new DoubleAnimation(6, 0, TimeSpan.FromMilliseconds(180))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop
+            });
+        textBlock.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop
+            });
     }
 
     private static void StopTextMarquee(TranslateTransform? transform)
@@ -718,6 +1699,7 @@ public partial class MusicOverlayWindow : Window
 
     private static void UpdateMarquee(
         Canvas viewport,
+        StackPanel panel,
         TextBlock first,
         Border spacer,
         TextBlock second,
@@ -734,7 +1716,15 @@ public partial class MusicOverlayWindow : Window
 
         var textWidth = MeasureTextWidth(first, text);
         var viewportWidth = viewport.ActualWidth;
-        if (viewportWidth <= 0 || textWidth <= viewportWidth + 1)
+        if (viewportWidth <= 0)
+            return;
+
+        // Centre the text while it fits; a line that has to scroll starts from
+        // the left edge instead, or its beginning would never be visible.
+        Canvas.SetLeft(panel, textWidth <= viewportWidth + 1
+            ? Math.Max(0, (viewportWidth - textWidth) / 2)
+            : 0);
+        if (textWidth <= viewportWidth + 1)
             return;
 
         const double gap = 32;
@@ -794,13 +1784,12 @@ public partial class MusicOverlayWindow : Window
         LyricsModeChanged?.Invoke(this, _lyricsMode);
     }
 
-    private void OnExitClick(object sender, RoutedEventArgs e)
-    {
-        // Close the context menu before closing the window; otherwise the popup
-        // can stay visible for a few seconds while WPF tears down the app.
-        if (RootBorder.ContextMenu is { IsOpen: true } menu)
-            menu.IsOpen = false;
+    /// <summary>True when the window is closing because the user chose Exit.</summary>
+    internal bool ExitRequested { get; private set; }
 
+    internal void ExitWidget()
+    {
+        ExitRequested = true;
         Close();
     }
 
@@ -821,6 +1810,10 @@ public partial class MusicOverlayWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern nint SetParent(nint child, nint newParent);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(nint hwnd, out NativeRect rect);
 
     [DllImport("user32.dll")]
     private static extern nint GetParent(nint hwnd);

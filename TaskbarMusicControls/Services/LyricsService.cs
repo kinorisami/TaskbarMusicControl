@@ -9,7 +9,22 @@ using System.Text.RegularExpressions;
 namespace TaskbarMusicControls.Services;
 
 internal sealed record LyricsRequest(string Title, string Artist, string Album, TimeSpan Duration);
-internal enum LyricsSourcePreference { Automatic, Netease, Lrclib }
+
+/// <summary>A place lyrics can come from.</summary>
+internal enum LyricsSource { Local, Netease, Lrclib }
+
+/// <summary>Which online provider is asked first when nothing is pinned.</summary>
+internal enum LyricsOnlineOrder { NeteaseFirst, LrclibFirst }
+
+/// <summary>
+/// The global setting: whether local files win over the online providers, and
+/// which of the two online providers comes first.
+/// </summary>
+internal sealed record LyricsSourceSettings(bool PreferLocal, LyricsOnlineOrder Order)
+{
+    public static LyricsSourceSettings Default { get; } =
+        new(true, LyricsOnlineOrder.NeteaseFirst);
+}
 internal sealed record LyricTrackLine(TimeSpan? Time, string Text);
 internal sealed record LyricFrame(string Text, TimeSpan? Time, TimeSpan? NextTime);
 internal sealed record LyricsFrame(LyricFrame? Original, LyricFrame? Translation);
@@ -25,10 +40,12 @@ internal sealed class LyricsDocument
 
     public LyricsDocument(
         IReadOnlyList<LyricTrackLine> originalLines,
-        IReadOnlyList<LyricTrackLine> translationLines)
+        IReadOnlyList<LyricTrackLine> translationLines,
+        TimeSpan? duration = null)
     {
         OriginalLines = originalLines;
         TranslationLines = translationLines;
+        Duration = duration;
         _originalTimed = BuildTimed(originalLines);
         _translationTimed = BuildTimed(translationLines);
         _originalUntimed = FindUntimed(originalLines);
@@ -37,6 +54,22 @@ internal sealed class LyricsDocument
 
     public IReadOnlyList<LyricTrackLine> OriginalLines { get; }
     public IReadOnlyList<LyricTrackLine> TranslationLines { get; }
+
+    /// <summary>
+    /// The length of the track the lyrics belong to, when the source reports it.
+    /// The player often does not publish a timeline, so this is what the progress
+    /// bar falls back to.
+    /// </summary>
+    public TimeSpan? Duration { get; }
+
+    /// <summary>Which provider produced this document.</summary>
+    public LyricsSource? Source { get; init; }
+
+    public LyricsDocument WithDuration(TimeSpan? duration) =>
+        new(OriginalLines, TranslationLines, duration) { Source = Source };
+
+    public LyricsDocument WithSource(LyricsSource source) =>
+        new(OriginalLines, TranslationLines, Duration) { Source = source };
 
     public bool HasLyrics => OriginalLines.Count > 0;
     public bool IsTimed => _originalTimed.Length > 0;
@@ -116,62 +149,175 @@ internal sealed class LyricsService
     private readonly LrclibLyricsProvider _online = new();
     private readonly LyricsCache _cache = new();
 
-    public async Task<LyricsDocument?> FindAsync(
-        LyricsRequest request, LyricsSourcePreference preference, CancellationToken token)
+    /// <summary>
+    /// Looks the song up again while ignoring what is cached, so a wrong match
+    /// (a cover, a live version, an instrumental) - or a source changed by the
+    /// user - can be replaced. Nothing is deleted: the fresh answer is written
+    /// over its own cache entry, and when the lookup finds nothing the cached
+    /// lyrics are used as they are.
+    /// </summary>
+    public async Task<LyricsDocument?> RefetchAsync(
+        LyricsRequest request, LyricsSourceSettings settings, LyricsSource? locked, CancellationToken token)
     {
-        if (preference == LyricsSourcePreference.Automatic)
-        {
-            try
-            {
-                var local = await _local.FindAsync(request, token).ConfigureAwait(false);
-                if (local is { HasLyrics: true }) return local;
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception) { /* Continue with online providers. */ }
-        }
+        var fresh = await FindAsync(request, settings, locked, token, bypassCache: true)
+            .ConfigureAwait(false);
+        if (fresh is { HasLyrics: true })
+            return fresh;
 
+        // Nothing better was found, so the existing cache still decides.
+        return await FindAsync(request, settings, locked, token).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Looks the song up in two stages. Everything already on disk is tried
+    /// first - the local files (when preferred) and then the caches of both
+    /// online providers in priority order - and only when none of them has the
+    /// lyrics are the providers asked, in the same order. A pinned song skips
+    /// all of that and only asks its source. With <paramref name="bypassCache"/>
+    /// the caches are skipped for this call but left untouched on disk.
+    /// </summary>
+    public async Task<LyricsDocument?> FindAsync(
+        LyricsRequest request, LyricsSourceSettings settings, LyricsSource? locked,
+        CancellationToken token, bool bypassCache = false)
+    {
+        if (locked is { } pinned)
+            return await FindInSourceAsync(request, pinned, bypassCache, token).ConfigureAwait(false);
+
+        var order = settings.Order == LyricsOnlineOrder.NeteaseFirst
+            ? new[] { LyricsSource.Netease, LyricsSource.Lrclib }
+            : new[] { LyricsSource.Lrclib, LyricsSource.Netease };
+
+        if (settings.PreferLocal)
+            return await FindOfflineFirstAsync(request, order, bypassCache, token).ConfigureAwait(false);
+
+        return await FindBySourcePriorityAsync(request, order, bypassCache, token).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Local files first: the local files, then both caches, and only when none
+    /// of them has the lyrics are the providers asked.
+    /// </summary>
+    private async Task<LyricsDocument?> FindOfflineFirstAsync(
+        LyricsRequest request, LyricsSource[] order, bool bypassCache, CancellationToken token)
+    {
+        var local = await FetchAsync(request, LyricsSource.Local, token).ConfigureAwait(false);
+        if (local is { HasLyrics: true }) return local;
         token.ThrowIfCancellationRequested();
-        if (preference != LyricsSourcePreference.Lrclib)
-        {
-            var neteaseCached = await _cache.ReadAsync(request, "netease", token).ConfigureAwait(false);
-            if (neteaseCached is { HasLyrics: true }) return neteaseCached;
 
-            try
+        if (!bypassCache)
+        {
+            foreach (var source in order)
             {
-                var neteaseLyrics = await _netease.FindAsync(request, token).ConfigureAwait(false);
-                if (neteaseLyrics is { HasLyrics: true })
-                {
-                    await TryCacheAsync(request, "netease", neteaseLyrics, token).ConfigureAwait(false);
-                    return neteaseLyrics;
-                }
+                var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
+                if (cached is { HasLyrics: true }) return cached;
+                token.ThrowIfCancellationRequested();
             }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-            catch (Exception) { /* Automatic mode can continue to LRCLIB. */ }
         }
 
-        if (preference == LyricsSourcePreference.Netease)
-            return null;
-
-        var cached = await _cache.ReadAsync(request, "lrclib", token).ConfigureAwait(false);
-        if (cached is { HasLyrics: true }) return cached;
-
-        // Read caches created by older versions, which did not record the provider.
-        if (preference == LyricsSourcePreference.Automatic)
+        foreach (var source in order)
         {
-            cached = await _cache.ReadLegacyAsync(request, token).ConfigureAwait(false);
+            var fetched = await FetchAsync(request, source, token).ConfigureAwait(false);
+            if (fetched is { HasLyrics: true })
+            {
+                await TryCacheAsync(request, SourceKey(source), fetched, token).ConfigureAwait(false);
+                return fetched;
+            }
+
+            token.ThrowIfCancellationRequested();
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Source priority: one source is finished - its cache and then its network
+    /// call - before the next source is asked.
+    /// </summary>
+    private async Task<LyricsDocument?> FindBySourcePriorityAsync(
+        LyricsRequest request, LyricsSource[] order, bool bypassCache, CancellationToken token)
+    {
+        foreach (var source in order)
+        {
+            if (!bypassCache)
+            {
+                var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
+                if (cached is { HasLyrics: true }) return cached;
+                token.ThrowIfCancellationRequested();
+            }
+
+            var fetched = await FetchAsync(request, source, token).ConfigureAwait(false);
+            if (fetched is { HasLyrics: true })
+            {
+                await TryCacheAsync(request, SourceKey(source), fetched, token).ConfigureAwait(false);
+                return fetched;
+            }
+
+            token.ThrowIfCancellationRequested();
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A pinned song only asks its source: cached lyrics first, the provider
+    /// second.
+    /// </summary>
+    private async Task<LyricsDocument?> FindInSourceAsync(
+        LyricsRequest request, LyricsSource source, bool bypassCache, CancellationToken token)
+    {
+        if (!bypassCache)
+        {
+            var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
             if (cached is { HasLyrics: true }) return cached;
         }
 
+        var fetched = await FetchAsync(request, source, token).ConfigureAwait(false);
+        if (fetched is not { HasLyrics: true }) return fetched;
+
+        if (source != LyricsSource.Local)
+            await TryCacheAsync(request, SourceKey(source), fetched, token).ConfigureAwait(false);
+        return fetched;
+    }
+
+    /// <summary>Reads the cache of one source. Errors mean "not cached".</summary>
+    private async Task<LyricsDocument?> ReadCachedAsync(
+        LyricsRequest request, LyricsSource source, CancellationToken token)
+    {
+        if (source == LyricsSource.Local)
+            return null;
+
         try
         {
-            var online = await _online.FindAsync(request, token).ConfigureAwait(false);
-            if (online is not { HasLyrics: true }) return null;
-            await TryCacheAsync(request, "lrclib", online, token).ConfigureAwait(false);
-            return online;
+            return await _cache.ReadAsync(request, SourceKey(source), token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception) { return null; }
     }
+
+    /// <summary>Asks one provider. Errors mean "not found".</summary>
+    private async Task<LyricsDocument?> FetchAsync(
+        LyricsRequest request, LyricsSource source, CancellationToken token)
+    {
+        try
+        {
+            return source switch
+            {
+                LyricsSource.Local => await _local.FindAsync(request, token).ConfigureAwait(false),
+                LyricsSource.Netease => await _netease.FindAsync(request, token).ConfigureAwait(false),
+                _ => await _online.FindAsync(request, token).ConfigureAwait(false)
+            };
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>The name a source is cached and stored under.</summary>
+    internal static string SourceKey(LyricsSource source) => source switch
+    {
+        LyricsSource.Netease => "netease",
+        LyricsSource.Lrclib => "lrclib",
+        _ => "local"
+    };
 
     private async Task TryCacheAsync(
         LyricsRequest request, string source, LyricsDocument lyrics, CancellationToken token)
@@ -184,15 +330,40 @@ internal sealed class LyricsService
 
 internal sealed class LyricsCache
 {
-    private static readonly string CacheDirectory = Path.Combine(
+    internal static readonly string CacheDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "TaskbarMusicControls", "Lyrics", "Cache");
+
+    /// <summary>
+    /// The file name a song is cached under. Accepts the "artist␟title␟album"
+    /// key the widget service already uses, so the cache, the per-song state and
+    /// the diagnostics all agree on one hash.
+    /// </summary>
+    internal static string HashTrackKey(string trackKey)
+    {
+        var parts = trackKey.Split('\u001f');
+        return Hash(string.Join("\u001f",
+            (parts.Length > 0 ? parts[0] : "").Trim(),
+            (parts.Length > 1 ? parts[1] : "").Trim(),
+            (parts.Length > 2 ? parts[2] : "").Trim()));
+    }
+
+    private static string Hash(string identity)
+    {
+        var normalized = identity.Normalize(NormalizationForm.FormKC).ToUpperInvariant();
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
+    }
 
     public Task<LyricsDocument?> ReadAsync(LyricsRequest request, string source, CancellationToken token) =>
         ReadPathAsync(GetPath(request, source), token);
 
-    public Task<LyricsDocument?> ReadLegacyAsync(LyricsRequest request, CancellationToken token) =>
-        ReadPathAsync(Path.Combine(CacheDirectory, GetHash(request) + ".json"), token);
+    private static LyricsSource? ParseSource(string? value) => value switch
+    {
+        "netease" => LyricsSource.Netease,
+        "lrclib" => LyricsSource.Lrclib,
+        "local" => LyricsSource.Local,
+        _ => null
+    };
 
     private static async Task<LyricsDocument?> ReadPathAsync(string path, CancellationToken token)
     {
@@ -203,14 +374,21 @@ internal sealed class LyricsCache
             var entry = await JsonSerializer.DeserializeAsync<LyricsCacheEntry>(
                 stream, cancellationToken: token).ConfigureAwait(false);
             if (entry is null) return null;
+            // Entries written before the duration was stored are treated as a
+            // miss so they are fetched again and rewritten with the new field.
+            if (entry.Version < LyricsCacheEntry.CurrentVersion) return null;
             if (entry.OriginalLines is { Length: > 0 } originalLines)
-                return new LyricsDocument(originalLines, entry.TranslationLines ?? []);
+            {
+                var document = new LyricsDocument(originalLines, entry.TranslationLines ?? [], entry.Duration);
+                return ParseSource(entry.Source) is { } source ? document.WithSource(source) : document;
+            }
             if (entry.Lines is { Length: > 0 } legacyLines)
             {
                 var original = legacyLines.Select(line => new LyricTrackLine(line.Time, line.Original)).ToArray();
                 var translation = legacyLines.Where(line => !string.IsNullOrWhiteSpace(line.Translation))
                     .Select(line => new LyricTrackLine(line.Time, line.Translation!)).ToArray();
-                return new LyricsDocument(original, translation);
+                var document = new LyricsDocument(original, translation, entry.Duration);
+                return ParseSource(entry.Source) is { } source ? document.WithSource(source) : document;
             }
             return null;
         }
@@ -252,8 +430,13 @@ internal sealed class LyricsCache
             {
                 await JsonSerializer.SerializeAsync(
                     stream, new LyricsCacheEntry(
-                        lyrics.OriginalLines.ToArray(), lyrics.TranslationLines.ToArray()), cancellationToken: token)
-                    .ConfigureAwait(false);
+                        lyrics.OriginalLines.ToArray(), lyrics.TranslationLines.ToArray(),
+                        Duration: lyrics.Duration,
+                        Version: LyricsCacheEntry.CurrentVersion,
+                        Source: lyrics.Source is { } documentSource
+                            ? LyricsService.SourceKey(documentSource)
+                            : null),
+                    cancellationToken: token).ConfigureAwait(false);
             }
             File.Move(tempPath, path, overwrite: true);
         }
@@ -267,19 +450,23 @@ internal sealed class LyricsCache
     private static string GetPath(LyricsRequest request, string source) =>
         Path.Combine(CacheDirectory, GetHash(request) + "." + source + ".json");
 
-    private static string GetHash(LyricsRequest request)
-    {
-        var identity = string.Join("\u001f", request.Artist.Trim(), request.Title.Trim(), request.Album.Trim())
-            .Normalize(NormalizationForm.FormKC)
-            .ToUpperInvariant();
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
-        return hash;
-    }
+    private static string GetHash(LyricsRequest request) =>
+        Hash(string.Join("\u001f", request.Artist.Trim(), request.Title.Trim(), request.Album.Trim()));
 
     private sealed record LyricsCacheEntry(
         LyricTrackLine[]? OriginalLines = null,
         LyricTrackLine[]? TranslationLines = null,
-        LegacyLyricLine[]? Lines = null);
+        LegacyLyricLine[]? Lines = null,
+        TimeSpan? Duration = null,
+        int Version = 0,
+        string? Source = null)
+    {
+        /// <summary>
+        /// Bumped whenever the stored shape changes. Entries of an older version
+        /// are ignored and fetched again.
+        /// </summary>
+        public const int CurrentVersion = 2;
+    }
     private sealed record LegacyLyricLine(TimeSpan? Time, string Original, string? Translation = null);
 }
 
@@ -307,7 +494,7 @@ internal sealed class LocalLyricsProvider : ILyricsProvider
             if (!File.Exists(path)) continue;
             var text = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
             var parsed = LyricsParser.Parse(text);
-            if (parsed.HasLyrics) return parsed;
+            if (parsed.HasLyrics) return parsed.WithSource(LyricsSource.Local);
         }
         return null;
     }
@@ -395,11 +582,35 @@ internal sealed class NeteaseLyricsProvider : ILyricsProvider
         var root = lyricsJson.RootElement;
         var originalText = GetNestedString(root, "lrc", "lyric");
         if (string.IsNullOrWhiteSpace(originalText)) return null;
+        // The matched song carries its length in the search result, so the
+        // progress bar gets a duration even when the player publishes none.
+        var duration = GetSongDuration(match);
         var original = LyricsParser.Parse(originalText);
         var translationText = GetNestedString(root, "tlyric", "lyric");
-        if (string.IsNullOrWhiteSpace(translationText)) return original;
+        if (string.IsNullOrWhiteSpace(translationText))
+            return original.WithDuration(duration).WithSource(LyricsSource.Netease);
         var translation = LyricsParser.Parse(translationText);
-        return LyricsParser.AddTranslation(original, translation);
+        return LyricsParser.AddTranslation(original, translation)
+            .WithDuration(duration)
+            .WithSource(LyricsSource.Netease);
+    }
+
+    /// <summary>
+    /// Reads the track length from a search result. `/api/search/get` returns it
+    /// as `duration` in milliseconds, `/api/cloudsearch/pc` as `dt`.
+    /// </summary>
+    private static TimeSpan? GetSongDuration(JsonElement song)
+    {
+        foreach (var name in new[] { "duration", "dt" })
+        {
+            if (song.TryGetProperty(name, out var value) &&
+                value.ValueKind == JsonValueKind.Number &&
+                value.TryGetInt64(out var milliseconds) &&
+                milliseconds > 0)
+                return TimeSpan.FromMilliseconds(milliseconds);
+        }
+
+        return null;
     }
 
     private static string[] GetArtistNames(JsonElement song)
@@ -467,15 +678,28 @@ internal sealed class LrclibLyricsProvider : ILyricsProvider
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var json = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
         var root = json.RootElement;
+        var duration = GetDuration(root);
         if (root.TryGetProperty("syncedLyrics", out var synced) && synced.ValueKind == JsonValueKind.String)
         {
             var parsed = LyricsParser.Parse(synced.GetString() ?? "");
-            if (parsed.HasLyrics) return parsed;
+            if (parsed.HasLyrics)
+                return parsed.WithDuration(duration).WithSource(LyricsSource.Lrclib);
         }
         if (root.TryGetProperty("plainLyrics", out var plain) && plain.ValueKind == JsonValueKind.String)
-            return LyricsParser.Parse(plain.GetString() ?? "");
+            return LyricsParser.Parse(plain.GetString() ?? "")
+                .WithDuration(duration)
+                .WithSource(LyricsSource.Lrclib);
         return null;
     }
+
+    /// <summary>LRCLIB returns the track length in seconds.</summary>
+    private static TimeSpan? GetDuration(JsonElement root) =>
+        root.TryGetProperty("duration", out var value) &&
+        value.ValueKind == JsonValueKind.Number &&
+        value.TryGetDouble(out var seconds) &&
+        seconds > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : null;
 
     private static HttpClient CreateClient()
     {

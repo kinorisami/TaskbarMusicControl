@@ -2,6 +2,17 @@ using System.Windows.Automation;
 
 namespace TaskbarMusicControls.Services;
 
+/// <summary>
+/// Notices changes inside the taskbar that have no window of their own - a
+/// taskbar button appearing, a tray icon moving into the hidden icons - by
+/// listening to UIA structure changes on the taskbar subtree.
+/// </summary>
+/// <remarks>
+/// The handler deliberately does not read any property from the event's element:
+/// doing that made a cross-process call for every event, and the burst that
+/// comes with opening a menu froze the UI thread for seconds. Debouncing is left
+/// to the caller.
+/// </remarks>
 internal sealed class TaskbarLayoutMonitor : IDisposable
 {
     private AutomationElement? _root;
@@ -16,16 +27,8 @@ internal sealed class TaskbarLayoutMonitor : IDisposable
         try
         {
             _root = AutomationElement.FromHandle(taskbarHandle);
-            _handler = (sender, _) =>
-            {
-                if (sender is AutomationElement element && IsOwnProcessElement(element))
-                    return;
-                LayoutChanged?.Invoke(this, EventArgs.Empty);
-            };
-            Automation.AddStructureChangedEventHandler(
-                _root,
-                TreeScope.Subtree,
-                _handler);
+            _handler = (_, _) => LayoutChanged?.Invoke(this, EventArgs.Empty);
+            Automation.AddStructureChangedEventHandler(_root, TreeScope.Subtree, _handler);
         }
         catch (ElementNotAvailableException)
         {
@@ -59,21 +62,5 @@ internal sealed class TaskbarLayoutMonitor : IDisposable
 
         _root = null;
         _handler = null;
-    }
-
-    private static bool IsOwnProcessElement(AutomationElement element)
-    {
-        try
-        {
-            return element.Current.ProcessId == Environment.ProcessId;
-        }
-        catch (ElementNotAvailableException)
-        {
-            return true;
-        }
-        catch (System.Runtime.InteropServices.COMException)
-        {
-            return true;
-        }
     }
 }
