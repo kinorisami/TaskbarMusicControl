@@ -18,7 +18,7 @@ internal sealed record WidgetSettings(
     bool TaskbarCentered)
 {
     public static WidgetSettings Default { get; } = new(
-        WidgetDisplayMode.FullDetails, "", LyricsSourceSettings.Default,
+        WidgetDisplayMode.Full, "", LyricsSourceSettings.Default,
         LyricsMode: false, ShowTranslation: true, StartWithWindows: false,
         Block: WidgetBlock.Right, Alignment: WidgetAlignment.Right,
         TaskbarCentered: false);
@@ -63,8 +63,12 @@ internal static class WidgetSettingsStore
             if (entry is not { Version: >= CurrentVersion })
                 return WidgetSettings.Default;
 
+            // A display mode this build does not know is replaced by the default
+            // and the file is rewritten once, so it stops carrying the old name.
+            var displayMode = ParseDisplayMode(entry.DisplayMode);
+
             needsWrite =
-                entry.DisplayMode is null ||
+                entry.DisplayMode != displayMode.ToString() ||
                 entry.TaskbarDeviceId is null ||
                 entry.LyricsPreferLocal is null ||
                 entry.LyricsOrder is null ||
@@ -76,9 +80,7 @@ internal static class WidgetSettingsStore
                 entry.TaskbarCentered is null;
 
             return new WidgetSettings(
-                entry.DisplayMode is { } mode && Enum.IsDefined(mode)
-                    ? mode
-                    : WidgetDisplayMode.FullDetails,
+                displayMode,
                 entry.TaskbarDeviceId ?? "",
                 new LyricsSourceSettings(
                     entry.LyricsPreferLocal ?? true,
@@ -100,6 +102,16 @@ internal static class WidgetSettingsStore
         }
     }
 
+    /// <summary>
+    /// The display mode is read as a name so a value this build does not know -
+    /// a mode that has been dropped since the file was written - falls back to
+    /// the default instead of failing the whole file.
+    /// </summary>
+    private static WidgetDisplayMode ParseDisplayMode(string? value) =>
+        Enum.TryParse<WidgetDisplayMode>(value, out var mode) && Enum.IsDefined(mode)
+            ? mode
+            : WidgetDisplayMode.Full;
+
     public static void Save(WidgetSettings settings)
     {
         try
@@ -113,7 +125,7 @@ internal static class WidgetSettingsStore
                     JsonSerializer.Serialize(stream, new Entry
                     {
                         Version = CurrentVersion,
-                        DisplayMode = settings.DisplayMode,
+                        DisplayMode = settings.DisplayMode.ToString(),
                         TaskbarDeviceId = settings.TaskbarDeviceId,
                         LyricsPreferLocal = settings.LyricsSources.PreferLocal,
                         LyricsOrder = settings.LyricsSources.Order,
@@ -147,7 +159,7 @@ internal static class WidgetSettingsStore
     private sealed class Entry
     {
         public int Version { get; set; }
-        public WidgetDisplayMode? DisplayMode { get; set; }
+        public string? DisplayMode { get; set; }
         public string? TaskbarDeviceId { get; set; }
         public bool? LyricsPreferLocal { get; set; }
         public LyricsOnlineOrder? LyricsOrder { get; set; }

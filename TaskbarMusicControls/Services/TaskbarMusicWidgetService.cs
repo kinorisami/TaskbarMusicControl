@@ -60,7 +60,7 @@ internal sealed class TaskbarMusicWidgetService
     private WidgetBlock _block = WidgetBlock.Right;
     private WidgetAlignment _alignment = WidgetAlignment.Right;
     private bool _taskbarCentered;
-    private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
+    private WidgetDisplayMode _displayMode = WidgetDisplayMode.Full;
     private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
     private TimeSpan _lyricsOffset;
     private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();

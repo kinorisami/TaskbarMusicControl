@@ -36,14 +36,14 @@ public enum WidgetAlignment
 
 internal enum WidgetDisplayMode
 {
-    FullDetails,
-    CoverAndControls,
-    CoverOnly,
     /// <summary>
-    /// The lyrics fill the widget; the playback controls stay out of the way
+    /// The default layout: the lyrics fill the widget, the metadata replaces them
+    /// when the song has none, and the playback controls stay out of the way
     /// until the pointer is over the widget, then slide down from the top edge.
     /// </summary>
-    LyricsWithHoverControls
+    Full,
+    CoverAndControls,
+    CoverOnly
 }
 
 /// <summary>
@@ -124,7 +124,7 @@ public partial class MusicOverlayWindow : Window
     {
         Interval = TimeSpan.FromMilliseconds(700)
     };
-    private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
+    private WidgetDisplayMode _displayMode = WidgetDisplayMode.Full;
     private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
     private LyricsSource? _lyricsSource;
     private bool _lyricsLocked;
@@ -486,7 +486,7 @@ public partial class MusicOverlayWindow : Window
     {
         _responsiveLayoutWidth = width;
         var effectiveMode = GetEffectiveMode(width, width);
-        _hoverControlsMode = effectiveMode == WidgetDisplayMode.LyricsWithHoverControls;
+        _hoverControlsMode = effectiveMode == WidgetDisplayMode.Full;
 
         if (effectiveMode == WidgetDisplayMode.CoverOnly)
         {
@@ -520,24 +520,14 @@ public partial class MusicOverlayWindow : Window
             return;
         }
 
+        // Full: no separate controls column; the lyrics use the whole width and
+        // the strip becomes a drawer over the text area.
         LyricsButton.Visibility = Visibility.Visible;
         LyricsButton.Width = 24;
         MetadataPanel.Visibility = Visibility.Visible;
-
-        if (effectiveMode == WidgetDisplayMode.LyricsWithHoverControls)
-        {
-            // No separate controls column: the lyrics use the whole width and the
-            // strip becomes a drawer over the text area.
-            MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
-            ControlsColumn.Width = new GridLength(0);
-            PlaceControlsAsDrawer();
-        }
-        else
-        {
-            MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
-            DockControlsInColumn(112);
-        }
-
+        MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
+        ControlsColumn.Width = new GridLength(0);
+        PlaceControlsAsDrawer();
         ScheduleMarqueeRefresh();
     }
 
@@ -901,14 +891,13 @@ public partial class MusicOverlayWindow : Window
             : TransportLayoutWidth;
         var fullCeiling = !damped
             ? DefaultWidth
-            : current is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls
+            : current == WidgetDisplayMode.Full
                 ? DefaultWidth - ModeHysteresis
                 : DefaultWidth + ModeHysteresis;
 
         // If the available width cannot fit the full layout at its natural size,
         // drop straight to cover-and-controls instead of squeezing the full layout.
-        if ((mode is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls) &&
-            availableWidth < fullCeiling)
+        if (mode == WidgetDisplayMode.Full && availableWidth < fullCeiling)
             mode = WidgetDisplayMode.CoverAndControls;
         if (availableWidth < coverOnlyCeiling)
             mode = WidgetDisplayMode.CoverOnly;
@@ -919,8 +908,7 @@ public partial class MusicOverlayWindow : Window
     {
         if (width < TransportLayoutWidth)
             return WidgetDisplayMode.CoverOnly;
-        if (mode is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls &&
-            width < DefaultWidth)
+        if (mode == WidgetDisplayMode.Full && width < DefaultWidth)
             return WidgetDisplayMode.CoverAndControls;
         return mode;
     }
@@ -996,10 +984,9 @@ public partial class MusicOverlayWindow : Window
         using var menu = new NativeMenu();
 
         var layout = menu.AddSubmenu("Layout");
-        AddDisplayMode(layout, "Full layout", WidgetDisplayMode.FullDetails);
+        AddDisplayMode(layout, "Full (controls on hover)", WidgetDisplayMode.Full);
         AddDisplayMode(layout, "Cover and controls", WidgetDisplayMode.CoverAndControls);
         AddDisplayMode(layout, "Cover only (hover to play/pause)", WidgetDisplayMode.CoverOnly);
-        AddDisplayMode(layout, "Lyrics (controls on hover)", WidgetDisplayMode.LyricsWithHoverControls);
 
         var source = menu.AddSubmenu("Lyric source");
         source.AddItem(LockText(), CmdLyricsLock, _lyricsLocked, _lyricsSource is not null);

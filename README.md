@@ -6,7 +6,7 @@
 
 - 显示歌曲标题、艺人、专辑封面和播放状态。
 - 控制上一首、播放/暂停、下一首；具体可用操作取决于播放器提供的媒体会话能力。
-- 三种显示布局：完整信息、封面与控制按钮、仅封面（悬停封面显示播放/暂停）。
+- 三种显示布局：完整（歌词铺满，鼠标移入时控制按钮从上方展开）、封面与控制按钮、仅封面（悬停封面显示播放/暂停）。
 - 显示同步歌词，支持原词和翻译双轨。
 - 歌词偏移可按歌曲单独设置，修正不同歌词版本的打轴误差。
 - 右键组件可选择歌词来源：
@@ -21,7 +21,7 @@
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/39170e90-c827-454b-97fe-f72b75d06370" />
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/68f5bed3-bc58-409a-b910-d75494a29516" />
 
-歌词只在**完整信息**布局下显示：另外两种布局不放歌词按钮，也放不下歌词面板。切换布局不会改变已经打开的歌词开关，切回完整信息布局时会重新显示歌词。
+歌词只在**完整**布局下显示：另外两种布局不放歌词按钮，也放不下歌词面板。切换布局不会改变已经打开的歌词开关，切回完整布局时会重新显示歌词。
 
 ## 系统要求
 
@@ -113,7 +113,7 @@ LRC 时间戳用于跟随播放进度；同一时间戳的连续两行会作为�
 
 组件设置位于 `%LOCALAPPDATA%\TaskbarMusicControls`：
 
-- `settings.json`：全部设置——`DisplayMode`（显示布局）、`TaskbarDeviceId`（选中的任务栏/显示器）、`LyricsPreferLocal`（本地文件是否优先）与 `LyricsOrder`（`NeteaseFirst` 或 `LrclibFirst`）。单曲锁定源与歌词偏移保存在该曲的 `.meta.json` 里。
+- `settings.json`：全部设置——`DisplayMode`（显示布局）、`TaskbarDeviceId`（选中的任务栏/显示器）、`LyricsPreferLocal`（本地文件是否优先）与 `LyricsOrder`（`NeteaseFirst` 或 `LrclibFirst`）。位置相关的是 `Block`（图标左侧还是右侧的空档）、`Alignment`（贴该空档的哪一端）和 `TaskbarCentered`（自动探测到的 Windows 任务栏图标对齐方式，决定是否存在左侧空档）。单曲锁定源与歌词偏移保存在该曲的 `.meta.json` 里。
   这是唯一的设置文件：读写都只走它。文件里没有 `Version` 时会被忽略并使用默认值（暂不提供旧格式迁移）。
 - `Lyrics\Cache\<hash>.meta.json`：单曲状态——歌词偏移、该曲锁定的歌词源、上次使用的源与匹配度。
 - `Lyrics\Cache`：在线歌词缓存。
