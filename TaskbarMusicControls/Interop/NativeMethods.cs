@@ -30,4 +30,25 @@ public static class NativeMethods
         IntPtr hwnd
     );
 
+    /// <summary>ShowWindow() command that restores a minimized window.</summary>
+    public const int SwRestore = 9;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsIconic(
+        IntPtr hwnd
+    );
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindow(
+        IntPtr hwnd,
+        int command
+    );
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetForegroundWindow(
+        IntPtr hwnd
+    );
 }

@@ -47,9 +47,10 @@ internal sealed class TaskbarMusicWidgetService
     private LyricsDocument? _lyrics;
     private CancellationTokenSource? _lyricsLookupCancellation;
     private string _lyricsTrackKey = "";
+    private LyricsSongState _songState = LyricsSongState.Empty;
     private bool _lyricsMode;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
-    private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
+    private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
     private TimeSpan _lyricsOffset;
     private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();
     private string _selectedTaskbarDeviceId = "";
@@ -81,7 +82,7 @@ internal sealed class TaskbarMusicWidgetService
     public async Task StartAsync()
     {
         _displayMode = WidgetDisplayModeStore.Load();
-        _lyricsSourcePreference = LyricsSourceStore.Load();
+        _lyricsSourceSettings = LyricsSourceStore.Load();
         _selectedTaskbarDeviceId = TaskbarSelectionStore.Load() ?? "";
         _layoutTimer.Start();
         await _mediaSessionService.InitializeAsync();
@@ -130,8 +131,14 @@ internal sealed class TaskbarMusicWidgetService
             _ = _mediaSessionService.TogglePlaybackAsync();
         overlay.NextRequested += (_, _) =>
             _ = _mediaSessionService.SkipNextAsync();
+        overlay.SeekRequested += (_, position) =>
+            _ = _mediaSessionService.SeekAsync(position);
+        overlay.PlayerActivateRequested += (_, _) =>
+            _mediaSessionService.ActivatePlayerWindow();
         overlay.LyricsModeChanged += OnLyricsModeChanged;
-        overlay.LyricsSourceChanged += OnLyricsSourceChanged;
+        overlay.LyricsSourceSettingsChanged += OnLyricsSourceSettingsChanged;
+        overlay.LyricsLockChanged += OnLyricsLockChanged;
+        overlay.LyricsRefetchRequested += (_, _) => RefetchLyrics();
         overlay.LyricsOffsetChanged += OnLyricsOffsetChanged;
         overlay.DisplayModeChanged += OnDisplayModeChanged;
         overlay.TaskbarSelectionChanged += OnTaskbarSelectionChanged;
@@ -139,7 +146,7 @@ internal sealed class TaskbarMusicWidgetService
 
         var state = _mediaSessionService.CurrentState;
         _latestMediaState = state;
-        overlay.SetLyricsSource(_lyricsSourcePreference);
+        overlay.SetLyricsSourceSettings(_lyricsSourceSettings);
         overlay.SetLyricsMode(_lyricsMode);
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
         ApplyMediaState(overlay, state);
@@ -198,21 +205,79 @@ internal sealed class TaskbarMusicWidgetService
         ScheduleLayoutRefresh();
     }
 
-    private void OnLyricsSourceChanged(object? sender, LyricsSourcePreference preference)
+    private void OnLyricsSourceSettingsChanged(object? sender, LyricsSourceSettings settings)
     {
-        if (_lyricsSourcePreference == preference)
+        if (_lyricsSourceSettings == settings)
             return;
 
-        _lyricsSourcePreference = preference;
-        LyricsSourceStore.Save(preference);
-        if (_overlay is not null && _latestMediaState.Title != "No media playing")
+        _lyricsSourceSettings = settings;
+        LyricsSourceStore.Save(settings);
+
+        // A song pinned to a source keeps it; the global setting only decides
+        // how everything else is looked up.
+        if (_songState.LockedSource is not null ||
+            _overlay is null || _latestMediaState.Title == "No media playing")
+            return;
+
+        // Re-fetch instead of a plain lookup: with caches in place the new order
+        // would otherwise answer from whichever source happens to be cached and
+        // the setting would look like it did nothing.
+        StartLyricsLookup(_latestMediaState, refetch: true);
+    }
+
+    /// <summary>
+    /// Pins the song on screen to the source its lyrics came from, or lets it
+    /// follow the global setting again.
+    /// </summary>
+    private void OnLyricsLockChanged(object? sender, bool locked)
+    {
+        var current = _lyrics?.Source ?? _songState.LastSource;
+        var target = locked ? current : null;
+        if (locked && target is null)
+        {
+            // Locking pins the source that is on screen; before the lyrics
+            // arrive there is nothing to pin.
+            _overlay?.SetLyricsLock(false, null);
+            return;
+        }
+
+        if (_songState.LockedSource == target)
+            return;
+
+        var wasLocked = _songState.LockedSource is not null;
+        _songState = _songState with { LockedSource = target };
+        LyricsSongStateStore.Save(_lyricsTrackKey, _songState);
+
+        if (_overlay is { } overlay)
+        {
+            overlay.SetLyricsLock(target is not null, current);
+            overlay.SetLyricsStatus(current);
+        }
+
+        // Unlocking hands the song back to the global setting, which may pick a
+        // different source; locking keeps exactly what is on screen.
+        if (wasLocked && target is null &&
+            _overlay is not null && _latestMediaState.Title != "No media playing")
             StartLyricsLookup(_latestMediaState);
+    }
+
+    /// <summary>
+    /// Throws away what is cached for the current song and looks it up again -
+    /// the way out of a wrong match that the cache would otherwise keep.
+    /// </summary>
+    private void RefetchLyrics()
+    {
+        if (_overlay is null || _latestMediaState.Title == "No media playing")
+            return;
+
+        StartLyricsLookup(_latestMediaState, refetch: true);
     }
 
     private void OnLyricsOffsetChanged(object? sender, TimeSpan offset)
     {
         _lyricsOffset = offset;
-        LyricsOffsetStore.Save(_lyricsTrackKey, offset);
+        _songState = _songState with { Offset = offset };
+        LyricsSongStateStore.Save(_lyricsTrackKey, _songState);
     }
 
     private void OnMediaSessionStateChanged(MediaSessionState state)
@@ -237,8 +302,11 @@ internal sealed class TaskbarMusicWidgetService
         {
             _lyricsTrackKey = trackKey;
             _lyrics = null;
-            _lyricsOffset = LyricsOffsetStore.Load(trackKey);
+            _songState = LyricsSongStateStore.Load(trackKey);
+            _lyricsOffset = _songState.Offset;
             overlay.SetLyricsOffset(_lyricsOffset);
+            overlay.SetLyricsLock(_songState.LockedSource is not null, _songState.LastSource);
+            overlay.SetLyricsStatus(_songState.LastSource);
             overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
             StartLyricsLookup(state);
         }
@@ -248,12 +316,14 @@ internal sealed class TaskbarMusicWidgetService
         }
         _lastArtwork = state.ArtworkBytes;
         overlay.UpdatePlaybackState(state.IsPlaying, state.CanPlayPause,
-            state.CanGoPrevious, state.CanGoNext);
+            state.CanGoPrevious, state.CanGoNext, state.CanSeek);
+        overlay.UpdateProgress(
+            _mediaSessionService.CurrentPosition, EffectiveDuration(state), state.IsPlaying);
         overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
         UpdateTimers(state);
     }
 
-    private void StartLyricsLookup(MediaSessionState state)
+    private void StartLyricsLookup(MediaSessionState state, bool refetch = false)
     {
         _lyricsLookupCancellation?.Cancel();
         _lyricsLookupCancellation?.Dispose();
@@ -261,23 +331,51 @@ internal sealed class TaskbarMusicWidgetService
         _lyrics = null;
         if (_overlay is { } overlay)
             overlay.UpdateLyrics(null, _mediaSessionService.CurrentPosition);
-        _ = FindLyricsAsync(_lyricsTrackKey, state, _lyricsSourcePreference,
-            _lyricsLookupCancellation.Token);
+        _ = FindLyricsAsync(_lyricsTrackKey, state, _lyricsSourceSettings,
+            _songState.LockedSource, _lyricsLookupCancellation.Token, refetch);
     }
 
     private byte[]? _lastArtwork;
 
+    /// <summary>
+    /// Remembers which source produced the lyrics that are on screen, so the
+    /// menu can show it and a later lookup keeps the same answer.
+    /// </summary>
+    private void RecordLyricsResult(LyricsDocument? result)
+    {
+        if (result?.Source is not { } source)
+            return;
+
+        _songState = _songState with
+        {
+            LastSource = source,
+            FetchedAt = DateTimeOffset.Now
+        };
+        LyricsSongStateStore.Save(_lyricsTrackKey, _songState);
+    }
+
+    /// <summary>
+    /// The length of the current track. The player's own timeline is preferred;
+    /// when it publishes none (many players do not), the length that came with
+    /// the lyrics is used instead.
+    /// </summary>
+    private TimeSpan EffectiveDuration(MediaSessionState state) =>
+        state.Duration > TimeSpan.Zero ? state.Duration : _lyrics?.Duration ?? TimeSpan.Zero;
+
     private async Task FindLyricsAsync(
         string trackKey,
         MediaSessionState state,
-        LyricsSourcePreference sourcePreference,
-        CancellationToken token)
+        LyricsSourceSettings settings,
+        LyricsSource? locked,
+        CancellationToken token,
+        bool refetch)
     {
         try
         {
-            var result = await _lyricsService.FindAsync(
-                new LyricsRequest(state.Title, state.Artist, state.Album, state.Duration),
-                sourcePreference, token);
+            var request = new LyricsRequest(state.Title, state.Artist, state.Album, state.Duration);
+            var result = refetch
+                ? await _lyricsService.RefetchAsync(request, settings, locked, token)
+                : await _lyricsService.FindAsync(request, settings, locked, token);
             if (token.IsCancellationRequested) return;
             var dispatcher = Application.Current.Dispatcher;
             await dispatcher.InvokeAsync(() =>
@@ -285,7 +383,16 @@ internal sealed class TaskbarMusicWidgetService
                 if (token.IsCancellationRequested || trackKey != _lyricsTrackKey || _overlay is not { } overlay)
                     return;
                 _lyrics = result;
+                RecordLyricsResult(result);
+                overlay.SetLyricsStatus(_songState.LastSource);
+                overlay.SetLyricsLock(_songState.LockedSource is not null, _songState.LastSource);
                 overlay.UpdateLyrics(_lyrics, _mediaSessionService.CurrentPosition);
+                // The lyrics may be the only source of the track length, so the
+                // progress bar is refreshed as soon as they arrive.
+                overlay.UpdateProgress(
+                    _mediaSessionService.CurrentPosition,
+                    EffectiveDuration(_latestMediaState),
+                    _latestMediaState.IsPlaying);
                 UpdateTimers(_latestMediaState);
             });
         }

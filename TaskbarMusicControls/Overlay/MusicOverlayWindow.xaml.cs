@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -17,7 +18,12 @@ internal enum WidgetDisplayMode
 {
     FullDetails,
     CoverAndControls,
-    CoverOnly
+    CoverOnly,
+    /// <summary>
+    /// The lyrics fill the widget; the playback controls stay out of the way
+    /// until the pointer is over the widget, then slide down from the top edge.
+    /// </summary>
+    LyricsWithHoverControls
 }
 
 /// <summary>
@@ -53,6 +59,19 @@ public partial class MusicOverlayWindow : Window
     private const double MinimumWidth = 50;
     private const double TransportLayoutWidth = 130;
 
+    /// <summary>
+    /// How far the control drawer drops down. It covers the whole text area so
+    /// the line underneath never peeks out under the drawer.
+    /// </summary>
+    private double DrawerRevealHeight => Height > 0 ? Height : 60;
+
+    private static readonly Brush DrawerBackground = CreateFrozenBrush(0xFA, 0xFF, 0xFF, 0xFF);
+    private static readonly Brush DrawerEdge = CreateFrozenBrush(0x22, 0x00, 0x00, 0x00);
+    private static readonly Brush AccentBrush = CreateFrozenBrush(0xFF, 0x16, 0x7C, 0x69);
+    private static readonly Brush InactiveBrush = CreateFrozenBrush(0xFF, 0x30, 0x34, 0x3A);
+    private const string CopyGlyph = "\uE8C8";
+    private const string CopiedGlyph = "\uE73E";
+
     private nint _taskbarHandle;
     private nint _parentTaskbarHandle;
     private nint _nativeHandle;
@@ -65,8 +84,32 @@ public partial class MusicOverlayWindow : Window
     private TimeSpan _lyricsOffset;
     private TimeSpan _lastLyricsPosition;
     private bool _hoverPlaybackOnlyMode;
+    private bool _hoverControlsMode;
+    private bool _drawerOpen;
+    private readonly DispatcherTimer _drawerHideTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(150)
+    };
+    private readonly DispatcherTimer _progressTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(250)
+    };
+    private TimeSpan _progressPosition;
+    private TimeSpan _progressDuration;
+    private bool _progressPlaying;
+    private long _progressAnchorTimestamp;
+    private bool _canSeek;
+    private bool _seeking;
+    private double _seekFraction;
+    private bool _showTranslation = true;
+    private readonly DispatcherTimer _copyFeedbackTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(700)
+    };
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
-    private LyricsSourcePreference _lyricsSourcePreference = LyricsSourcePreference.Automatic;
+    private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
+    private LyricsSource? _lyricsSource;
+    private bool _lyricsLocked;
     private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();
     private string _selectedTaskbarDeviceId = "";
     private double _lastAvailableWidth = DefaultWidth;
@@ -84,9 +127,13 @@ public partial class MusicOverlayWindow : Window
     public event EventHandler? NextRequested;
     public event Action<object?, bool>? LyricsModeChanged;
     internal event Action<object?, WidgetDisplayMode>? DisplayModeChanged;
-    internal event Action<object?, LyricsSourcePreference>? LyricsSourceChanged;
+    internal event Action<object?, LyricsSourceSettings>? LyricsSourceSettingsChanged;
+    internal event EventHandler? LyricsRefetchRequested;
+    internal event Action<object?, bool>? LyricsLockChanged;
     internal event Action<object?, TimeSpan>? LyricsOffsetChanged;
     internal event Action<object?, string>? TaskbarSelectionChanged;
+    internal event Action<object?, TimeSpan>? SeekRequested;
+    internal event EventHandler? PlayerActivateRequested;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -96,6 +143,20 @@ public partial class MusicOverlayWindow : Window
         InitializeComponent();
         SourceInitialized += OnSourceInitialized;
         IsVisibleChanged += OnIsVisibleChanged;
+        _drawerHideTimer.Tick += OnDrawerHideTimerTick;
+        _progressTimer.Tick += (_, _) => RenderProgress();
+        _copyFeedbackTimer.Tick += (_, _) =>
+        {
+            _copyFeedbackTimer.Stop();
+            CopyButton.Content = CopyGlyph;
+        };
+    }
+
+    private static SolidColorBrush CreateFrozenBrush(byte a, byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(a, r, g, b));
+        brush.Freeze();
+        return brush;
     }
 
     public void UpdateMedia(string title, string artist, byte[]? artworkBytes)
@@ -182,7 +243,8 @@ public partial class MusicOverlayWindow : Window
         bool isPlaying,
         bool canPlayPause,
         bool canGoPrevious,
-        bool canGoNext)
+        bool canGoNext,
+        bool canSeek)
     {
         ToggleButton.Content = isPlaying ? "Ⅱ" : "▶";
         ToggleButton.IsEnabled = canPlayPause;
@@ -192,7 +254,19 @@ public partial class MusicOverlayWindow : Window
         ToggleButton.SetValue(
             AutomationProperties.NameProperty,
             isPlaying ? "Pause" : "Play");
+        _canSeek = canSeek;
+        UpdateProgressCursor();
     }
+
+    /// <summary>
+    /// The bar is only clickable when the player accepts a seek *and* a total
+    /// length is known - without one there is nothing to map the click onto.
+    /// </summary>
+    private bool ProgressInteractive => _canSeek && _progressDuration > TimeSpan.Zero;
+
+    private void UpdateProgressCursor() =>
+        ProgressHit.Cursor = ProgressInteractive ? System.Windows.Input.Cursors.Hand
+            : System.Windows.Input.Cursors.Arrow;
 
     internal void UpdateLyrics(LyricsDocument? lyrics, TimeSpan position)
     {
@@ -203,13 +277,17 @@ public partial class MusicOverlayWindow : Window
             lyricPosition = TimeSpan.Zero;
         var current = lyrics?.At(lyricPosition);
         var originalFrame = current?.Original;
-        var translationFrame = current?.Translation;
+        var translationFrame = _showTranslation ? current?.Translation : null;
         var original = originalFrame?.Text;
         var translation = translationFrame?.Text;
         var hasTranslation = !string.IsNullOrWhiteSpace(translation);
         var hasLine = _lyricsMode && !string.IsNullOrWhiteSpace(original);
         LyricsPanel.Visibility = hasLine ? Visibility.Visible : Visibility.Collapsed;
         MetadataTextPanel.Visibility = hasLine ? Visibility.Collapsed : Visibility.Visible;
+        // Nothing to copy before the first line of the song, and nothing to
+        // toggle when the source delivered no translation at all.
+        CopyButton.IsEnabled = hasLine;
+        TranslationButton.IsEnabled = lyrics is { TranslationLines.Count: > 0 };
         if (!hasLine) return;
 
         var originalChanged = original != _renderedOriginal || originalFrame!.Time != _renderedOriginalTime;
@@ -228,6 +306,10 @@ public partial class MusicOverlayWindow : Window
             : null;
         LyricsOriginalText.Text = _renderedOriginal;
         LyricsTranslationText.Text = _renderedTranslation ?? "";
+        if (originalChanged)
+            AnimateLineEnter(LyricsOriginalText);
+        if (translationChanged)
+            AnimateLineEnter(LyricsTranslationText);
         LyricsOriginalCanvas.VerticalAlignment = hasTranslation
             ? VerticalAlignment.Top
             : VerticalAlignment.Center;
@@ -316,6 +398,7 @@ public partial class MusicOverlayWindow : Window
     {
         _responsiveLayoutWidth = width;
         var effectiveMode = GetEffectiveMode(width);
+        _hoverControlsMode = effectiveMode == WidgetDisplayMode.LyricsWithHoverControls;
 
         if (effectiveMode == WidgetDisplayMode.CoverOnly)
         {
@@ -324,7 +407,7 @@ public partial class MusicOverlayWindow : Window
             Artwork.HorizontalAlignment = HorizontalAlignment.Center;
             MetadataPanel.Visibility = Visibility.Collapsed;
             MetadataColumn.Width = new GridLength(0);
-            ControlsColumn.Width = new GridLength(0);
+            DockControlsInColumn(0);
             PlaybackControls.Visibility = Visibility.Collapsed;
             SetHoverPlaybackOnlyMode(true);
             return;
@@ -345,16 +428,314 @@ public partial class MusicOverlayWindow : Window
             LyricsButton.Width = 0;
             MetadataPanel.Visibility = Visibility.Collapsed;
             MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
-            ControlsColumn.Width = new GridLength(74);
+            DockControlsInColumn(74);
             return;
         }
 
         LyricsButton.Visibility = Visibility.Visible;
         LyricsButton.Width = 24;
         MetadataPanel.Visibility = Visibility.Visible;
-        MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
-        ControlsColumn.Width = new GridLength(112);
+
+        if (effectiveMode == WidgetDisplayMode.LyricsWithHoverControls)
+        {
+            // No separate controls column: the lyrics use the whole width and the
+            // strip becomes a drawer over the text area.
+            MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
+            ControlsColumn.Width = new GridLength(0);
+            PlaceControlsAsDrawer();
+        }
+        else
+        {
+            MetadataColumn.Width = new GridLength(1, GridUnitType.Star);
+            DockControlsInColumn(112);
+        }
+
         ScheduleMarqueeRefresh();
+    }
+
+    /// <summary>
+    /// Puts the control strip back into its own column on the right, where every
+    /// layout except the lyrics one shows it.
+    /// </summary>
+    private void DockControlsInColumn(double columnWidth)
+    {
+        ControlsColumn.Width = new GridLength(columnWidth);
+        Grid.SetColumn(ControlsReveal, 2);
+        ControlsReveal.BeginAnimation(FrameworkElement.HeightProperty, null);
+        ControlsReveal.Height = double.NaN;
+        ControlsReveal.Background = null;
+        ControlsReveal.BorderThickness = new Thickness(0);
+        ControlsReveal.VerticalAlignment = VerticalAlignment.Stretch;
+        DrawerLayout.Margin = new Thickness(0);
+        PlaybackControls.HorizontalAlignment = HorizontalAlignment.Stretch;
+        PlaybackControls.Margin = new Thickness(0);
+        ProgressText.Visibility = Visibility.Collapsed;
+        ProgressHit.Visibility = Visibility.Collapsed;
+        CopyButton.Visibility = Visibility.Collapsed;
+        TranslationButton.Visibility = Visibility.Collapsed;
+        _seeking = false;
+        _drawerOpen = false;
+        _drawerHideTimer.Stop();
+        _progressTimer.Stop();
+    }
+
+    /// <summary>
+    /// Moves the control strip over the text area, where it drops down from the
+    /// top edge as a drawer with its own background.
+    /// </summary>
+    private void PlaceControlsAsDrawer()
+    {
+        Grid.SetColumn(ControlsReveal, 1);
+        ControlsReveal.Background = DrawerBackground;
+        ControlsReveal.BorderThickness = new Thickness(0, 0, 0, 1);
+        ControlsReveal.BorderBrush = DrawerEdge;
+        ControlsReveal.VerticalAlignment = VerticalAlignment.Top;
+        DrawerLayout.Margin = new Thickness(10, 0, 10, 0);
+        PlaybackControls.HorizontalAlignment = HorizontalAlignment.Right;
+        PlaybackControls.Margin = new Thickness(0);
+        ProgressText.Visibility = Visibility.Visible;
+        ProgressHit.Visibility = Visibility.Visible;
+        CopyButton.Visibility = Visibility.Visible;
+        TranslationButton.Visibility = Visibility.Visible;
+        UpdateTranslationButton();
+        UpdateProgressCursor();
+        RenderProgress();
+        ApplyDrawerRestState();
+    }
+
+    /// <summary>
+    /// Puts the drawer back in place without animating: open where the pointer
+    /// already is, closed everywhere else.
+    /// </summary>
+    private void ApplyDrawerRestState()
+    {
+        _drawerOpen = _hoverControlsMode &&
+            (ContentArea.IsMouseOver || ControlsReveal.IsMouseOver || IsContextMenuOpen);
+        ControlsReveal.BeginAnimation(FrameworkElement.HeightProperty, null);
+        ControlsReveal.Height = _drawerOpen ? DrawerRevealHeight : 0;
+        if (_drawerOpen)
+        {
+            _progressTimer.Start();
+            RenderProgress();
+        }
+        else
+        {
+            _progressTimer.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Feeds the progress bar with the position the widget last received. The
+    /// media service only publishes a state when something changes, so the
+    /// overlay advances the bar itself between those updates.
+    /// </summary>
+    internal void UpdateProgress(TimeSpan position, TimeSpan duration, bool isPlaying)
+    {
+        _progressPosition = position;
+        _progressDuration = duration;
+        _progressPlaying = isPlaying;
+        _progressAnchorTimestamp = Stopwatch.GetTimestamp();
+        UpdateProgressCursor();
+        RenderProgress();
+    }
+
+    private void RenderProgress()
+    {
+        var position = _seeking ? PreviewPosition() : CurrentProgressPosition();
+        if (_progressDuration > TimeSpan.Zero)
+        {
+            ProgressText.Text =
+                $"{FormatPlaybackTime(position)} / {FormatPlaybackTime(_progressDuration)}";
+            var fraction = Math.Clamp(
+                position.TotalSeconds / _progressDuration.TotalSeconds, 0, 1);
+            ProgressFill.Width = Math.Max(0, ProgressTrack.ActualWidth * fraction);
+            return;
+        }
+
+        // The player reports no length (an empty timeline), so only the elapsed
+        // time can be shown - the bar itself would have nothing to measure.
+        ProgressText.Text = FormatPlaybackTime(position);
+        ProgressFill.Width = 0;
+    }
+
+    private TimeSpan CurrentProgressPosition()
+    {
+        var position = _progressPosition;
+        if (_progressPlaying)
+            position += Stopwatch.GetElapsedTime(_progressAnchorTimestamp);
+        if (_progressDuration > TimeSpan.Zero && position > _progressDuration)
+            position = _progressDuration;
+        return position < TimeSpan.Zero ? TimeSpan.Zero : position;
+    }
+
+    private static string FormatPlaybackTime(TimeSpan value) =>
+        $"{(int)value.TotalMinutes}:{value.Seconds:00}";
+
+    private TimeSpan PreviewPosition() => TimeSpan.FromTicks(
+        (long)(_progressDuration.Ticks * Math.Clamp(_seekFraction, 0, 1)));
+
+    private void OnProgressMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!ProgressInteractive)
+            return;
+
+        _seeking = true;
+        // Stop the interpolation so the preview is not overwritten mid-drag.
+        _progressTimer.Stop();
+        _seekFraction = FractionAt(e.GetPosition(ProgressHit).X);
+        RenderProgress();
+        ProgressHit.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void OnProgressMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_seeking)
+            return;
+
+        _seekFraction = FractionAt(e.GetPosition(ProgressHit).X);
+        RenderProgress();
+    }
+
+    private void OnProgressMouseUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!_seeking)
+            return;
+
+        _seekFraction = FractionAt(e.GetPosition(ProgressHit).X);
+        CommitSeek();
+        if (ProgressHit.IsMouseCaptured)
+            ProgressHit.ReleaseMouseCapture();
+    }
+
+    private void OnProgressLostCapture(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_seeking)
+            return;
+
+        // Capture can be lost without a mouse-up (the context menu, alt-tab).
+        // Keep the preview position: the user still asked to go there.
+        CommitSeek();
+    }
+
+    private double FractionAt(double x)
+    {
+        var width = ProgressHit.ActualWidth;
+        return width <= 0 ? 0 : Math.Clamp(x / width, 0, 1);
+    }
+
+    private void CommitSeek()
+    {
+        _seeking = false;
+        _progressTimer.Start();
+        var target = PreviewPosition();
+        // Move the widget right away; the player may take a moment to catch up.
+        _progressPosition = target;
+        _progressAnchorTimestamp = Stopwatch.GetTimestamp();
+        RenderProgress();
+        SeekRequested?.Invoke(this, target);
+    }
+
+    private void OnCopyClick(object sender, RoutedEventArgs e)
+    {
+        var text = CurrentLyricText();
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception)
+        {
+            // The clipboard can be held open by another process; doing nothing
+            // is better than crashing the widget.
+            return;
+        }
+
+        CopyButton.Content = CopiedGlyph;
+        _copyFeedbackTimer.Stop();
+        _copyFeedbackTimer.Start();
+    }
+
+    /// <summary>
+    /// What the copy button puts on the clipboard: the line on screen, so the
+    /// translation is only included while it is displayed.
+    /// </summary>
+    private string CurrentLyricText()
+    {
+        if (string.IsNullOrWhiteSpace(_renderedOriginal))
+            return "";
+        return string.IsNullOrWhiteSpace(_renderedTranslation)
+            ? _renderedOriginal
+            : _renderedOriginal + Environment.NewLine + _renderedTranslation;
+    }
+
+    private void OnTranslationClick(object sender, RoutedEventArgs e)
+    {
+        _showTranslation = !_showTranslation;
+        UpdateTranslationButton();
+        UpdateLyrics(_lyrics, _lastLyricsPosition);
+    }
+
+    private void UpdateTranslationButton() =>
+        TranslationButton.Foreground = _showTranslation ? AccentBrush : InactiveBrush;
+
+    private void SetDrawerOpen(bool open)
+    {
+        if (!_hoverControlsMode || _drawerOpen == open)
+            return;
+
+        _drawerOpen = open;
+        if (open)
+        {
+            _progressTimer.Start();
+            // The bar is sized from the track width, which is only known after
+            // the drawer has been laid out.
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RenderProgress));
+        }
+        else
+        {
+            _progressTimer.Stop();
+        }
+
+        ControlsReveal.BeginAnimation(
+            FrameworkElement.HeightProperty,
+            new DoubleAnimation(open ? DrawerRevealHeight : 0,
+                TimeSpan.FromMilliseconds(open ? 180 : 140))
+            {
+                EasingFunction = new CubicEase
+                {
+                    EasingMode = open ? EasingMode.EaseOut : EasingMode.EaseIn
+                },
+                FillBehavior = FillBehavior.HoldEnd
+            });
+    }
+
+    private void OnContentMouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        _drawerHideTimer.Stop();
+        SetDrawerOpen(true);
+    }
+
+    private void OnContentMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (IsContextMenuOpen)
+            return;
+
+        // The text area and the drawer are siblings, so moving onto the open
+        // drawer leaves the text area for a moment. The short delay turns that
+        // into a hand-over instead of a flicker.
+        _drawerHideTimer.Stop();
+        _drawerHideTimer.Start();
+    }
+
+    private void OnDrawerHideTimerTick(object? sender, EventArgs e)
+    {
+        _drawerHideTimer.Stop();
+        if (ContentArea.IsMouseOver || ControlsReveal.IsMouseOver || IsContextMenuOpen)
+            return;
+        SetDrawerOpen(false);
     }
 
     private WidgetDisplayMode GetEffectiveMode(double availableWidth)
@@ -362,7 +743,8 @@ public partial class MusicOverlayWindow : Window
         var mode = _displayMode;
         // If the available width cannot fit the full layout at its natural size,
         // drop straight to cover-and-controls instead of squeezing the full layout.
-        if (mode == WidgetDisplayMode.FullDetails && availableWidth < DefaultWidth)
+        if ((mode is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls) &&
+            availableWidth < DefaultWidth)
             mode = WidgetDisplayMode.CoverAndControls;
         if (availableWidth < TransportLayoutWidth)
             mode = WidgetDisplayMode.CoverOnly;
@@ -382,7 +764,7 @@ public partial class MusicOverlayWindow : Window
 
     private void UpdateDisplayModeMenuChecks()
     {
-        foreach (var item in RootBorder.ContextMenu?.Items.OfType<MenuItem>() ?? [])
+        foreach (var item in LayoutMenu.Items.OfType<MenuItem>())
         {
             if (Enum.TryParse<WidgetDisplayMode>(item.Tag?.ToString(), out var mode))
                 item.IsChecked = mode == _displayMode;
@@ -399,53 +781,122 @@ public partial class MusicOverlayWindow : Window
         DisplayModeChanged?.Invoke(this, mode);
     }
 
-    internal void SetLyricsSource(LyricsSourcePreference preference)
+    /// <summary>Mirrors the global setting in the menu.</summary>
+    internal void SetLyricsSourceSettings(LyricsSourceSettings settings)
     {
-        _lyricsSourcePreference = preference;
-        var sourceMenu = RootBorder.ContextMenu?.Items.OfType<MenuItem>()
-            .FirstOrDefault(menu => menu.Header?.ToString() == "Lyric source");
-        foreach (var item in sourceMenu?.Items.OfType<MenuItem>() ?? [])
+        _lyricsSourceSettings = settings;
+        PreferLocalItem.IsChecked = settings.PreferLocal;
+        NeteaseFirstItem.IsChecked = settings.Order == LyricsOnlineOrder.NeteaseFirst;
+        LrclibFirstItem.IsChecked = settings.Order == LyricsOnlineOrder.LrclibFirst;
+    }
+
+    /// <summary>Shows which source the lyrics on screen came from.</summary>
+    internal void SetLyricsStatus(LyricsSource? source)
+    {
+        _lyricsSource = source;
+        UpdateLockItem();
+    }
+
+    /// <summary>
+    /// A locked song keeps the source its lyrics came from; the settings below
+    /// only apply to songs that follow them.
+    /// </summary>
+    internal void SetLyricsLock(bool locked, LyricsSource? source)
+    {
+        _lyricsLocked = locked;
+        if (source is not null)
+            _lyricsSource = source;
+
+        UpdateLockItem();
+        LyricsLockItem.IsEnabled = _lyricsSource is not null;
+        PreferLocalItem.IsEnabled = !locked;
+        NeteaseFirstItem.IsEnabled = !locked;
+        LrclibFirstItem.IsEnabled = !locked;
+    }
+
+    private void UpdateLockItem()
+    {
+        LyricsLockIcon.Visibility = _lyricsLocked ? Visibility.Visible : Visibility.Collapsed;
+        LyricsLockItem.Header = _lyricsSource switch
         {
-            item.IsCheckable = true;
-            item.IsChecked = Enum.TryParse<LyricsSourcePreference>(item.Tag?.ToString(), out var value) &&
-                value == preference;
-        }
+            null => "Lock source",
+            var source => _lyricsLocked
+                ? $"Locked to {SourceName(source)}"
+                : $"Lock to {SourceName(source)}"
+        };
     }
 
-    private void OnLyricsSourceClick(object sender, RoutedEventArgs e)
+    private static string SourceName(LyricsSource? source) => source switch
     {
-        if (sender is not MenuItem item ||
-            !Enum.TryParse<LyricsSourcePreference>(item.Tag?.ToString(), out var preference))
-            return;
+        LyricsSource.Netease => "NetEase Music",
+        LyricsSource.Lrclib => "LRCLIB",
+        LyricsSource.Local => "Local file",
+        _ => "-"
+    };
 
-        SetLyricsSource(preference);
-        LyricsSourceChanged?.Invoke(this, preference);
+    private void OnLyricsRefetchClick(object sender, RoutedEventArgs e) =>
+        LyricsRefetchRequested?.Invoke(this, EventArgs.Empty);
+
+    private void OnLyricsLockClick(object sender, RoutedEventArgs e) =>
+        LyricsLockChanged?.Invoke(this, !_lyricsLocked);
+
+    private void OnPreferLocalClick(object sender, RoutedEventArgs e)
+    {
+        var settings = _lyricsSourceSettings with { PreferLocal = PreferLocalItem.IsChecked };
+        SetLyricsSourceSettings(settings);
+        LyricsSourceSettingsChanged?.Invoke(this, settings);
     }
+
+    private void OnOnlineOrderClick(object sender, RoutedEventArgs e)
+    {
+        var order = ReferenceEquals(sender, LrclibFirstItem)
+            ? LyricsOnlineOrder.LrclibFirst
+            : LyricsOnlineOrder.NeteaseFirst;
+        var settings = _lyricsSourceSettings with { Order = order };
+        SetLyricsSourceSettings(settings);
+        LyricsSourceSettingsChanged?.Invoke(this, settings);
+    }
+
+    /// <summary>How far the lyric offset can be pushed in either direction.</summary>
+    private const int MaxOffsetMs = 15000;
 
     internal void SetLyricsOffset(TimeSpan offset)
     {
-        _lyricsOffset = offset;
-        var offsetMenu = RootBorder.ContextMenu?.Items.OfType<MenuItem>()
-            .FirstOrDefault(menu => menu.Header?.ToString() == "Lyric timing (this song)");
-        foreach (var item in offsetMenu?.Items.OfType<MenuItem>() ?? [])
-        {
-            item.IsCheckable = true;
-            item.IsChecked = int.TryParse(item.Tag?.ToString(), out var milliseconds) &&
-                milliseconds == (int)offset.TotalMilliseconds;
-        }
+        _lyricsOffset = ClampOffset(offset);
+        UpdateOffsetStatus();
         if (_lyrics is not null)
             UpdateLyrics(_lyrics, _lastLyricsPosition);
     }
 
+    private void UpdateOffsetStatus()
+    {
+        var seconds = _lyricsOffset.TotalSeconds;
+        var text = seconds == 0
+            ? "0.0 s"
+            : seconds.ToString("+0.0;-0.0", CultureInfo.InvariantCulture) + " s";
+        LyricsOffsetStatus.Header = $"Current: {text}";
+        LyricsOffsetReset.IsEnabled = seconds != 0;
+    }
+
+    private static TimeSpan ClampOffset(TimeSpan offset) => TimeSpan.FromMilliseconds(
+        Math.Clamp((int)offset.TotalMilliseconds, -MaxOffsetMs, MaxOffsetMs));
+
     private void OnLyricsOffsetClick(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem item ||
-            !int.TryParse(item.Tag?.ToString(), out var milliseconds))
+            !int.TryParse(item.Tag?.ToString(), out var deltaMs))
             return;
 
-        var offset = TimeSpan.FromMilliseconds(milliseconds);
-        SetLyricsOffset(offset);
-        LyricsOffsetChanged?.Invoke(this, offset);
+        // The menu stays open, so every click adds to what is already set
+        // instead of replacing it.
+        SetLyricsOffset(_lyricsOffset + TimeSpan.FromMilliseconds(deltaMs));
+        LyricsOffsetChanged?.Invoke(this, _lyricsOffset);
+    }
+
+    private void OnLyricsOffsetResetClick(object sender, RoutedEventArgs e)
+    {
+        SetLyricsOffset(TimeSpan.Zero);
+        LyricsOffsetChanged?.Invoke(this, TimeSpan.Zero);
     }
 
     internal void SetTaskbarOptions(
@@ -546,6 +997,46 @@ public partial class MusicOverlayWindow : Window
             HoverPlaybackButton.Visibility = Visibility.Visible;
     }
 
+    /// <summary>Left click on the cover brings the player's window forward.</summary>
+    private void OnArtworkMouseUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != System.Windows.Input.MouseButton.Left)
+            return;
+
+        PlayerActivateRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Middle click copies "title - artist".</summary>
+    private void OnArtworkMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != System.Windows.Input.MouseButton.Middle)
+            return;
+        if (_currentTitle is "No media playing" || _currentTitle is "Start playback in a media app")
+            return;
+
+        var text = string.IsNullOrWhiteSpace(_currentArtist)
+            ? _currentTitle
+            : $"{_currentTitle} - {_currentArtist}";
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        // A short dip in opacity is the only feedback that fits in 48 px.
+        Artwork.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(1, 0.5, TimeSpan.FromMilliseconds(90))
+            {
+                AutoReverse = true,
+                FillBehavior = FillBehavior.Stop
+            });
+        e.Handled = true;
+    }
+
     private void OnArtworkMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
         // Opening the context menu steals mouse capture and raises MouseLeave even
@@ -561,6 +1052,8 @@ public partial class MusicOverlayWindow : Window
             HoverPlaybackButton.Visibility = Artwork.IsMouseOver
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+        if (!ContentArea.IsMouseOver && !ControlsReveal.IsMouseOver)
+            SetDrawerOpen(false);
     }
 
     private bool IsContextMenuOpen => RootBorder.ContextMenu?.IsOpen == true;
@@ -625,9 +1118,9 @@ public partial class MusicOverlayWindow : Window
             MetadataPanel.ActualWidth <= 0)
             return;
 
-        UpdateMarquee(TitleCanvas, TitlePrimary, TitleSpacer, TitleSecondary,
+        UpdateMarquee(TitleCanvas, TitlePanel, TitlePrimary, TitleSpacer, TitleSecondary,
             TitleTranslation, _currentTitle);
-        UpdateMarquee(ArtistCanvas, ArtistPrimary, ArtistSpacer, ArtistSecondary,
+        UpdateMarquee(ArtistCanvas, ArtistPanel, ArtistPrimary, ArtistSpacer, ArtistSecondary,
             ArtistTranslation, _currentArtist);
         RefreshLyricsMarquees();
     }
@@ -641,18 +1134,23 @@ public partial class MusicOverlayWindow : Window
         if (!IsLoaded || LyricsPanel.Visibility != Visibility.Visible) return;
         if (refreshOriginal)
             UpdateLyricsMarquee(LyricsOriginalCanvas, LyricsOriginalText, _renderedOriginal,
-                _renderedTranslation is null, _originalTimeRemaining);
+                true, _originalTimeRemaining);
         if (refreshTranslation && _renderedTranslation is not null)
             UpdateLyricsMarquee(LyricsTranslationCanvas, LyricsTranslationText,
-                _renderedTranslation, false, _translationTimeRemaining);
+                _renderedTranslation, true, _translationTimeRemaining);
     }
 
     private void OnIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (IsVisible)
+        {
             ScheduleMarqueeRefresh();
+        }
         else
+        {
             StopMarqueeAnimations();
+            _progressTimer.Stop();
+        }
     }
 
     private void StopMarqueeAnimations()
@@ -661,6 +1159,34 @@ public partial class MusicOverlayWindow : Window
         StopTextMarquee(ArtistTranslation);
         StopTextMarquee(LyricsOriginalText.RenderTransform as TranslateTransform);
         StopTextMarquee(LyricsTranslationText.RenderTransform as TranslateTransform);
+    }
+
+    /// <summary>
+    /// Slides a new lyric line up into place instead of swapping it in. The
+    /// X axis of the same transform belongs to the marquee, so only Y is used.
+    /// </summary>
+    private static void AnimateLineEnter(TextBlock textBlock)
+    {
+        if (textBlock.RenderTransform is not TranslateTransform transform)
+        {
+            transform = new TranslateTransform();
+            textBlock.RenderTransform = transform;
+        }
+
+        transform.BeginAnimation(
+            TranslateTransform.YProperty,
+            new DoubleAnimation(6, 0, TimeSpan.FromMilliseconds(180))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop
+            });
+        textBlock.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop
+            });
     }
 
     private static void StopTextMarquee(TranslateTransform? transform)
@@ -718,6 +1244,7 @@ public partial class MusicOverlayWindow : Window
 
     private static void UpdateMarquee(
         Canvas viewport,
+        StackPanel panel,
         TextBlock first,
         Border spacer,
         TextBlock second,
@@ -734,7 +1261,15 @@ public partial class MusicOverlayWindow : Window
 
         var textWidth = MeasureTextWidth(first, text);
         var viewportWidth = viewport.ActualWidth;
-        if (viewportWidth <= 0 || textWidth <= viewportWidth + 1)
+        if (viewportWidth <= 0)
+            return;
+
+        // Centre the text while it fits; a line that has to scroll starts from
+        // the left edge instead, or its beginning would never be visible.
+        Canvas.SetLeft(panel, textWidth <= viewportWidth + 1
+            ? Math.Max(0, (viewportWidth - textWidth) / 2)
+            : 0);
+        if (textWidth <= viewportWidth + 1)
             return;
 
         const double gap = 32;

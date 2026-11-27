@@ -113,9 +113,9 @@ LRC 时间戳用于跟随播放进度；同一时间戳的连续两行会作为�
 组件设置位于 `%LOCALAPPDATA%\TaskbarMusicControls`：
 
 - `display-mode.txt`：显示布局。
-- `lyrics-source.txt`：歌词来源选择（`Automatic`、`Netease` 或 `Lrclib`）。
+- `lyrics-source.txt`：全局歌词来源设置——`PreferLocal`（本地文件是否优先）与 `Order`（`NeteaseFirst` 或 `LrclibFirst`）。单曲锁定源保存在该曲的 `.meta.json` 里。
 - `taskbar.txt`：选中的任务栏/显示器设备 ID。
-- `Lyrics\Offsets`：按歌曲保存的歌词偏移。
+- `Lyrics\Cache\<hash>.meta.json`：单曲状态——歌词偏移、该曲锁定的歌词源、上次使用的源与匹配度。
 - `Lyrics\Cache`：在线歌词缓存。
 - `Logs\playback-sync.log`：播放位置校正诊断日志（仅 Debug 构建）。
 - `Logs\taskbar-layout.log`：任务栏布局探测诊断日志（除错误信息外仅 Debug 构建；错误行在所有构建中都会记录）。

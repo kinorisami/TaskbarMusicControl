@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.IO;
+using TaskbarMusicControls.Interop;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
 
@@ -75,6 +78,64 @@ internal sealed class MediaSessionService
     public Task TogglePlaybackAsync() => RunCommandAsync(session => session.TryTogglePlayPauseAsync());
 
     public Task SkipNextAsync() => RunCommandAsync(session => session.TrySkipNextAsync());
+
+    /// <summary>
+    /// Brings the window of the player behind the current session to the front.
+    /// A Win32 player reports its executable as the session id, which is enough
+    /// to find its main window; for a packaged app there is no reliable way to
+    /// get there, so nothing happens.
+    /// </summary>
+    public void ActivatePlayerWindow()
+    {
+        var sessionId = _session?.SourceAppUserModelId;
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !sessionId.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        try
+        {
+            var processName = Path.GetFileNameWithoutExtension(sessionId);
+            var handle = Process.GetProcessesByName(processName)
+                .Select(process => process.MainWindowHandle)
+                .FirstOrDefault(candidate => candidate != 0);
+            if (handle == 0)
+                return;
+
+            if (NativeMethods.IsIconic(handle))
+                NativeMethods.ShowWindow(handle, NativeMethods.SwRestore);
+            NativeMethods.SetForegroundWindow(handle);
+        }
+        catch (Exception)
+        {
+            // A player that refuses to come forward is not worth an error.
+        }
+    }
+
+    public async Task SeekAsync(TimeSpan position)
+    {
+        var session = _session;
+        if (session is null)
+            return;
+
+        if (position < TimeSpan.Zero)
+            position = TimeSpan.Zero;
+
+        try
+        {
+            await session.TryChangePlaybackPositionAsync(position.Ticks);
+        }
+        catch (Exception)
+        {
+            // A player that refuses the seek simply keeps playing from where it
+            // was; the clock is left alone.
+            return;
+        }
+
+        // Move the clock right away instead of waiting for the player to report
+        // the new position back.
+        _playbackClock.SeekTo(position);
+        await RefreshTimelineNowAsync();
+    }
 
     private async Task RunCommandAsync(
         Func<GlobalSystemMediaTransportControlsSession, Windows.Foundation.IAsyncOperation<bool>> command)
@@ -310,6 +371,7 @@ internal sealed class MediaSessionService
                 CanPlayPause = canPlayPause,
                 CanGoPrevious = controls.IsPreviousEnabled,
                 CanGoNext = controls.IsNextEnabled,
+                CanSeek = controls.IsPlaybackPositionEnabled,
                 Duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : CurrentState.Duration
             });
         }
@@ -399,7 +461,8 @@ internal sealed class MediaSessionService
                 controls.IsPreviousEnabled,
                 controls.IsNextEnabled,
                 album,
-                timeline.EndTime));
+                timeline.EndTime,
+                controls.IsPlaybackPositionEnabled));
         }
         finally
         {
@@ -775,7 +838,9 @@ internal sealed record MediaSessionState(
     bool CanGoPrevious,
     bool CanGoNext,
     string Album = "",
-    TimeSpan Duration = default)
+    TimeSpan Duration = default,
+    /// <summary>Whether the player accepts a jump to a playback position.</summary>
+    bool CanSeek = false)
 {
     public static MediaSessionState Empty { get; } = new(
         "No media playing",
