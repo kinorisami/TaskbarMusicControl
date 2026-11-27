@@ -33,6 +33,15 @@ internal sealed class TaskbarMusicWidgetService
     private static readonly TimeSpan ProbePollInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ProbeDuration = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// How many quiet scans end the probe. One scan costs about 45 ms of a pool
+    /// thread and a UI Automation call into Explorer, so the probe stops once the
+    /// layout has been seen unchanged a few times instead of running its full
+    /// length every time.
+    /// </summary>
+    private const int ProbeStableScansToStop = 3;
+    private int _probeStableScans;
+
     private readonly DispatcherTimer _layoutTimer = new()
     {
         Interval = NormalPollInterval
@@ -828,7 +837,7 @@ internal sealed class TaskbarMusicWidgetService
     private void OnLayoutTimerTick(object? sender, EventArgs e)
     {
         if (_layoutTimer.Interval == ProbePollInterval && DateTime.UtcNow >= _probeUntil)
-            _layoutTimer.Interval = NormalPollInterval;
+            EndLayoutProbe();
 
         _ = RefreshTaskbarLayoutAsync();
     }
@@ -836,9 +845,17 @@ internal sealed class TaskbarMusicWidgetService
     /// <summary>Switches the poll to the fast interval while the shell settles.</summary>
     private void StartLayoutProbe()
     {
+        _probeStableScans = 0;
         _probeUntil = DateTime.UtcNow + ProbeDuration;
         if (_layoutTimer.Interval != ProbePollInterval)
             _layoutTimer.Interval = ProbePollInterval;
+    }
+
+    private void EndLayoutProbe()
+    {
+        _probeStableScans = 0;
+        _probeUntil = DateTime.MinValue;
+        _layoutTimer.Interval = NormalPollInterval;
     }
 
     private void OnTaskbarLayoutChanged(object? sender, EventArgs e)
@@ -910,7 +927,14 @@ internal sealed class TaskbarMusicWidgetService
         // block that matters is the one the widget is pinned to: with a left
         // aligned widget the right block can stay put while the left one grows.
         if (blockBounds != _positionedBlockBounds)
+        {
             StartLayoutProbe();
+        }
+        else if (_layoutTimer.Interval == ProbePollInterval &&
+                 ++_probeStableScans >= ProbeStableScansToStop)
+        {
+            EndLayoutProbe();
+        }
 
         if (_settleRefreshesLeft <= 0)
             return;
@@ -985,14 +1009,17 @@ internal sealed class TaskbarMusicWidgetService
             {
                 _layoutRefreshRequested = false;
                 DiscardMissingSelection();
+                var detectStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 var layouts = await Task.Run(DetectTaskbarLayouts);
+                var detectMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(
+                    detectStarted).TotalMilliseconds;
                 _taskbarOptions = layouts.Select(entry => new TaskbarOption(
                     entry.Taskbar.DeviceId,
                     entry.Taskbar.DisplayName,
                     entry.Taskbar.IsPrimary)).ToArray();
                 _overlay?.SetTaskbarOptions(_taskbarOptions, _selectedTaskbarDeviceId);
                 TaskbarLayoutDiagnostics.Write(
-                    $"layout detected: available=" +
+                    $"layout detected ({detectMilliseconds:F1} ms): available=" +
                     string.Join(";", layouts.Select(entry => entry.Layout.AvailableBounds)));
                 if (layouts.Length > 0)
                 {
