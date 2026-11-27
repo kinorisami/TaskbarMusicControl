@@ -927,9 +927,18 @@ public partial class MusicOverlayWindow : Window
         finally
         {
             _menuOpen = false;
-            // The drawer closes on its own if the pointer is no longer over the
-            // widget once the menu is gone.
-            if (!RootBorder.IsMouseOver)
+
+            // The pointer may have left while the menu held the mouse, so the
+            // hover states are restored from where it is now - the same thing the
+            // WPF menu's Closed handler used to do.
+            if (_hoverPlaybackOnlyMode)
+            {
+                HoverPlaybackButton.Visibility = Artwork.IsMouseOver
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+
+            if (!ContentArea.IsMouseOver && !ControlsReveal.IsMouseOver)
                 SetDrawerOpen(false);
         }
     }

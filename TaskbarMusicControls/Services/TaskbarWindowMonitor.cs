@@ -15,6 +15,9 @@ internal sealed class TaskbarWindowMonitor : IDisposable
     private const int ChildIdSelf = 0;
     private const uint GaRoot = 2;
     private readonly WinEventDelegate _callback;
+    // The hook is called on the thread that installed it, so one buffer is
+    // enough; dragging a window fires these events at pointer rate.
+    private readonly StringBuilder _classNameBuffer = new(128);
     private nint _hook;
     private bool _disposed;
 
@@ -77,9 +80,9 @@ internal sealed class TaskbarWindowMonitor : IDisposable
         if (root == 0)
             return;
 
-        var className = new StringBuilder(128);
-        if (GetClassName(root, className, className.Capacity) <= 0 ||
-            !TaskbarDetector.IsTaskbarClassName(className.ToString()))
+        _classNameBuffer.Clear();
+        if (GetClassName(root, _classNameBuffer, _classNameBuffer.Capacity) <= 0 ||
+            !TaskbarDetector.IsTaskbarClassName(_classNameBuffer.ToString()))
             return;
 
         if (eventType == EventObjectCreate && root == hwnd)
