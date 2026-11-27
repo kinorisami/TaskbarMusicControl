@@ -76,7 +76,12 @@ public partial class MusicOverlayWindow : Window
     private const uint SwpNoActivate = 0x0010;
     private static readonly nint HwndTop = 0;
     private const double DefaultWidth = 350;
-    private const double MinimumWidth = 50;
+    /// <summary>
+    /// The cover-only layout is exactly as wide as the artwork; anything wider
+    /// leaves a transparent seam on both sides of it, which shows as the taskbar
+    /// between the widget edge and the cover.
+    /// </summary>
+    private const double MinimumWidth = 48;
     private const double TransportLayoutWidth = 130;
 
     /// <summary>
@@ -431,8 +436,10 @@ public partial class MusicOverlayWindow : Window
         var physicalTop = taskbarBounds.Top +
             (taskbarBounds.Height - physicalHeight) / 2;
 
-        Left = physicalLeft / dpi.DpiScaleX;
-        Top = physicalTop / dpi.DpiScaleY;
+        // Left/Top are deliberately not assigned: WPF would send its own
+        // SetWindowPos for them - with screen coordinates, which a child window
+        // does not use - and the window would move twice and repaint twice. A
+        // child window is placed by the explicit SetWindowPos below only.
         var handle = new WindowInteropHelper(this).Handle;
         if (handle != 0)
         {
