@@ -438,7 +438,10 @@ internal sealed class TaskbarMusicWidgetService
                 ? await _lyricsService.RefetchAsync(request, settings, locked, token)
                 : await _lyricsService.FindAsync(request, settings, locked, token);
             if (token.IsCancellationRequested) return;
-            var dispatcher = Application.Current.Dispatcher;
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher is null || dispatcher.HasShutdownStarted)
+                return;
+
             await dispatcher.InvokeAsync(() =>
             {
                 if (token.IsCancellationRequested || trackKey != _lyricsTrackKey || _overlay is not { } overlay)
@@ -534,7 +537,11 @@ internal sealed class TaskbarMusicWidgetService
     {
         await _mediaSessionService.RefreshTimelineNowAsync();
         var state = _mediaSessionService.CurrentState;
-        await Application.Current.Dispatcher.InvokeAsync(() =>
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted)
+            return;
+
+        await dispatcher.InvokeAsync(() =>
         {
             _latestMediaState = state;
             if (_overlay is { } overlay)
@@ -578,7 +585,13 @@ internal sealed class TaskbarMusicWidgetService
 
     private void ScheduleLayoutRefresh()
     {
-        var dispatcher = Application.Current.Dispatcher;
+        // The WinEvent and UIA callbacks can outlive the application: a hook can
+        // fire while the widget is shutting down, when Application.Current is
+        // already gone. Nothing to refresh then.
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted)
+            return;
+
         _ = dispatcher.BeginInvoke(() =>
         {
             _layoutChangeTimer.Stop();
@@ -699,6 +712,7 @@ internal sealed class TaskbarMusicWidgetService
             do
             {
                 _layoutRefreshRequested = false;
+                DiscardMissingSelection();
                 var layouts = await Task.Run(DetectTaskbarLayouts);
                 _taskbarOptions = layouts.Select(entry => new TaskbarOption(
                     entry.Taskbar.DeviceId,
@@ -938,6 +952,35 @@ internal sealed class TaskbarMusicWidgetService
 
         _overlay = null;
         ShowOverlay(taskbarHandle, layout);
+    }
+
+    /// <summary>
+    /// Drops a selection whose taskbar no longer exists - the monitor was
+    /// unplugged or disabled - and moves to the primary one, so the widget keeps
+    /// showing somewhere instead of waiting for a taskbar that will not come
+    /// back. A taskbar that exists but whose UIA walk failed is kept: that is
+    /// temporary and the selection should return to it.
+    /// </summary>
+    private void DiscardMissingSelection()
+    {
+        if (_selectedTaskbarDeviceId.Length == 0)
+            return;
+
+        var taskbars = _taskbarDetector.DetectTaskbars();
+        if (taskbars.Count == 0)
+            return;
+
+        if (taskbars.Any(taskbar => string.Equals(
+                taskbar.DeviceId, _selectedTaskbarDeviceId, StringComparison.Ordinal)))
+            return;
+
+        var fallback = taskbars.FirstOrDefault(taskbar => taskbar.IsPrimary) ?? taskbars[0];
+        TaskbarLayoutDiagnostics.Write(
+            $"selected taskbar {_selectedTaskbarDeviceId} is gone: " +
+            $"falling back to {fallback.DeviceId}");
+        _selectedTaskbarDeviceId = fallback.DeviceId;
+        _overlay?.SetTaskbarSelection(_selectedTaskbarDeviceId);
+        SaveSettings();
     }
 
     private TaskbarLayoutEntry[] DetectTaskbarLayouts()
