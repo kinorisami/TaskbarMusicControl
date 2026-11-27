@@ -150,29 +150,22 @@ internal sealed class LyricsService
     private readonly LyricsCache _cache = new();
 
     /// <summary>
-    /// Drops every cached copy of a song and looks it up again, so a wrong match
-    /// (a cover, a live version, an instrumental) can be replaced without the
-    /// user having to delete cache files by hand.
+    /// Looks the song up again while ignoring what is cached, so a wrong match
+    /// (a cover, a live version, an instrumental) - or a source changed by the
+    /// user - can be replaced. Nothing is deleted: the fresh answer is written
+    /// over its own cache entry, and when the lookup finds nothing the cached
+    /// lyrics are used as they are.
     /// </summary>
     public async Task<LyricsDocument?> RefetchAsync(
         LyricsRequest request, LyricsSourceSettings settings, LyricsSource? locked, CancellationToken token)
     {
-        // Keep the current entries: a failed refresh must not leave the song
-        // without lyrics.
-        var backups = await _cache.ReadAllAsync(request, token).ConfigureAwait(false);
-        await _cache.ClearAllAsync(request).ConfigureAwait(false);
-
-        var fresh = await FindAsync(request, settings, locked, token).ConfigureAwait(false);
+        var fresh = await FindAsync(request, settings, locked, token, bypassCache: true)
+            .ConfigureAwait(false);
         if (fresh is { HasLyrics: true })
-        {
-            // Only the source that answered is cached now, so a later lookup
-            // cannot pick up one of the entries that were just discarded.
             return fresh;
-        }
 
-        foreach (var (source, document) in backups)
-            await TryCacheAsync(request, source, document, token).ConfigureAwait(false);
-        return backups.Count > 0 ? backups[0].Document : null;
+        // Nothing better was found, so the existing cache still decides.
+        return await FindAsync(request, settings, locked, token).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -180,22 +173,24 @@ internal sealed class LyricsService
     /// first - the local files (when preferred) and then the caches of both
     /// online providers in priority order - and only when none of them has the
     /// lyrics are the providers asked, in the same order. A pinned song skips
-    /// all of that and only asks its source.
+    /// all of that and only asks its source. With <paramref name="bypassCache"/>
+    /// the caches are skipped for this call but left untouched on disk.
     /// </summary>
     public async Task<LyricsDocument?> FindAsync(
-        LyricsRequest request, LyricsSourceSettings settings, LyricsSource? locked, CancellationToken token)
+        LyricsRequest request, LyricsSourceSettings settings, LyricsSource? locked,
+        CancellationToken token, bool bypassCache = false)
     {
         if (locked is { } pinned)
-            return await FindInSourceAsync(request, pinned, token).ConfigureAwait(false);
+            return await FindInSourceAsync(request, pinned, bypassCache, token).ConfigureAwait(false);
 
         var order = settings.Order == LyricsOnlineOrder.NeteaseFirst
             ? new[] { LyricsSource.Netease, LyricsSource.Lrclib }
             : new[] { LyricsSource.Lrclib, LyricsSource.Netease };
 
         if (settings.PreferLocal)
-            return await FindOfflineFirstAsync(request, order, token).ConfigureAwait(false);
+            return await FindOfflineFirstAsync(request, order, bypassCache, token).ConfigureAwait(false);
 
-        return await FindBySourcePriorityAsync(request, order, token).ConfigureAwait(false);
+        return await FindBySourcePriorityAsync(request, order, bypassCache, token).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -203,17 +198,20 @@ internal sealed class LyricsService
     /// of them has the lyrics are the providers asked.
     /// </summary>
     private async Task<LyricsDocument?> FindOfflineFirstAsync(
-        LyricsRequest request, LyricsSource[] order, CancellationToken token)
+        LyricsRequest request, LyricsSource[] order, bool bypassCache, CancellationToken token)
     {
         var local = await FetchAsync(request, LyricsSource.Local, token).ConfigureAwait(false);
         if (local is { HasLyrics: true }) return local;
         token.ThrowIfCancellationRequested();
 
-        foreach (var source in order)
+        if (!bypassCache)
         {
-            var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
-            if (cached is { HasLyrics: true }) return cached;
-            token.ThrowIfCancellationRequested();
+            foreach (var source in order)
+            {
+                var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
+                if (cached is { HasLyrics: true }) return cached;
+                token.ThrowIfCancellationRequested();
+            }
         }
 
         foreach (var source in order)
@@ -236,13 +234,16 @@ internal sealed class LyricsService
     /// call - before the next source is asked.
     /// </summary>
     private async Task<LyricsDocument?> FindBySourcePriorityAsync(
-        LyricsRequest request, LyricsSource[] order, CancellationToken token)
+        LyricsRequest request, LyricsSource[] order, bool bypassCache, CancellationToken token)
     {
         foreach (var source in order)
         {
-            var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
-            if (cached is { HasLyrics: true }) return cached;
-            token.ThrowIfCancellationRequested();
+            if (!bypassCache)
+            {
+                var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
+                if (cached is { HasLyrics: true }) return cached;
+                token.ThrowIfCancellationRequested();
+            }
 
             var fetched = await FetchAsync(request, source, token).ConfigureAwait(false);
             if (fetched is { HasLyrics: true })
@@ -262,10 +263,13 @@ internal sealed class LyricsService
     /// second.
     /// </summary>
     private async Task<LyricsDocument?> FindInSourceAsync(
-        LyricsRequest request, LyricsSource source, CancellationToken token)
+        LyricsRequest request, LyricsSource source, bool bypassCache, CancellationToken token)
     {
-        var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
-        if (cached is { HasLyrics: true }) return cached;
+        if (!bypassCache)
+        {
+            var cached = await ReadCachedAsync(request, source, token).ConfigureAwait(false);
+            if (cached is { HasLyrics: true }) return cached;
+        }
 
         var fetched = await FetchAsync(request, source, token).ConfigureAwait(false);
         if (fetched is not { HasLyrics: true }) return fetched;
@@ -353,43 +357,6 @@ internal sealed class LyricsCache
     public Task<LyricsDocument?> ReadAsync(LyricsRequest request, string source, CancellationToken token) =>
         ReadPathAsync(GetPath(request, source), token);
 
-    /// <summary>
-    /// Every cached copy of a song, tagged with the source it came from. Used to
-    /// restore the entries when a re-fetch does not produce anything better.
-    /// </summary>
-    public async Task<IReadOnlyList<(string Source, LyricsDocument Document)>> ReadAllAsync(
-        LyricsRequest request, CancellationToken token)
-    {
-        var entries = new List<(string Source, LyricsDocument Document)>();
-        foreach (var path in GetSongCacheFiles(request))
-        {
-            var document = await ReadPathAsync(path, token).ConfigureAwait(false);
-            if (document is { HasLyrics: true })
-                entries.Add((SourceOf(path), document));
-        }
-        return entries;
-    }
-
-    /// <summary>Removes every cached copy of a song, whatever the source.</summary>
-    public Task ClearAllAsync(LyricsRequest request)
-    {
-        foreach (var path in GetSongCacheFiles(request))
-            TryDelete(path);
-        return Task.CompletedTask;
-    }
-
-    private static IEnumerable<string> GetSongCacheFiles(LyricsRequest request)
-    {
-        if (!Directory.Exists(CacheDirectory))
-            return [];
-
-        // The hash is 64 hex characters, so this prefix cannot match another
-        // song. The per-song state file lives next to the lyrics and must survive
-        // a refresh: it holds the offset and the source pin.
-        return Directory.GetFiles(CacheDirectory, GetHash(request) + "*.json")
-            .Where(path => !path.EndsWith(".meta.json", StringComparison.OrdinalIgnoreCase));
-    }
-
     private static LyricsSource? ParseSource(string? value) => value switch
     {
         "netease" => LyricsSource.Netease,
@@ -397,14 +364,6 @@ internal sealed class LyricsCache
         "local" => LyricsSource.Local,
         _ => null
     };
-
-    private static string SourceOf(string path)
-    {
-        // "<hash>.<source>.json" for a provider cache, "<hash>.json" for a legacy one.
-        var name = Path.GetFileNameWithoutExtension(path);
-        var separator = name.IndexOf('.');
-        return separator < 0 ? "legacy" : name[(separator + 1)..];
-    }
 
     private static async Task<LyricsDocument?> ReadPathAsync(string path, CancellationToken token)
     {

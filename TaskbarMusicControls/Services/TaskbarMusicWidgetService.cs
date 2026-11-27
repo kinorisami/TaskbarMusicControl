@@ -49,6 +49,8 @@ internal sealed class TaskbarMusicWidgetService
     private string _lyricsTrackKey = "";
     private LyricsSongState _songState = LyricsSongState.Empty;
     private bool _lyricsMode;
+    private bool _showTranslation = true;
+    private bool _startWithWindows;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
     private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
     private TimeSpan _lyricsOffset;
@@ -81,9 +83,22 @@ internal sealed class TaskbarMusicWidgetService
 
     public async Task StartAsync()
     {
-        _displayMode = WidgetDisplayModeStore.Load();
-        _lyricsSourceSettings = LyricsSourceStore.Load();
-        _selectedTaskbarDeviceId = TaskbarSelectionStore.Load() ?? "";
+        var settings = WidgetSettingsStore.Load(out var needsWrite);
+        _displayMode = settings.DisplayMode;
+        _lyricsSourceSettings = settings.LyricsSources;
+        _selectedTaskbarDeviceId = settings.TaskbarDeviceId;
+        _lyricsMode = settings.LyricsMode;
+        _showTranslation = settings.ShowTranslation;
+        _startWithWindows = settings.StartWithWindows;
+
+        // Only when the file was missing or a key was absent: the defaults of the
+        // new keys are written once, not on every start.
+        if (needsWrite)
+            SaveSettings();
+
+        // settings.json is the source of truth; the Run key follows it.
+        if (_startWithWindows != AutostartStore.IsRegistered())
+            AutostartStore.Set(_startWithWindows);
         _layoutTimer.Start();
         await _mediaSessionService.InitializeAsync();
 
@@ -140,6 +155,8 @@ internal sealed class TaskbarMusicWidgetService
         overlay.LyricsLockChanged += OnLyricsLockChanged;
         overlay.LyricsRefetchRequested += (_, _) => RefetchLyrics();
         overlay.LyricsOffsetChanged += OnLyricsOffsetChanged;
+        overlay.TranslationChanged += OnTranslationChanged;
+        overlay.StartupChanged += OnStartupChanged;
         overlay.DisplayModeChanged += OnDisplayModeChanged;
         overlay.TaskbarSelectionChanged += OnTaskbarSelectionChanged;
         overlay.Closed += OnOverlayClosed;
@@ -148,6 +165,8 @@ internal sealed class TaskbarMusicWidgetService
         _latestMediaState = state;
         overlay.SetLyricsSourceSettings(_lyricsSourceSettings);
         overlay.SetLyricsMode(_lyricsMode);
+        overlay.SetShowTranslation(_showTranslation);
+        overlay.SetStartWithWindows(_startWithWindows);
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
         ApplyMediaState(overlay, state);
         overlay.Show();
@@ -169,10 +188,15 @@ internal sealed class TaskbarMusicWidgetService
         return true;
     }
 
+    /// <summary>Writes every setting, so the file always holds the full state.</summary>
+    private void SaveSettings() => WidgetSettingsStore.Save(new WidgetSettings(
+        _displayMode, _selectedTaskbarDeviceId, _lyricsSourceSettings,
+        _lyricsMode, _showTranslation, _startWithWindows));
+
     private void OnDisplayModeChanged(object? sender, WidgetDisplayMode mode)
     {
         _displayMode = mode;
-        WidgetDisplayModeStore.Save(mode);
+        SaveSettings();
 
         if (_overlay is { } overlay &&
             _positionedTaskbar != 0 &&
@@ -201,7 +225,7 @@ internal sealed class TaskbarMusicWidgetService
             return;
 
         _selectedTaskbarDeviceId = deviceId;
-        TaskbarSelectionStore.Save(deviceId);
+        SaveSettings();
         ScheduleLayoutRefresh();
     }
 
@@ -211,7 +235,7 @@ internal sealed class TaskbarMusicWidgetService
             return;
 
         _lyricsSourceSettings = settings;
-        LyricsSourceStore.Save(settings);
+        SaveSettings();
 
         // A song pinned to a source keeps it; the global setting only decides
         // how everything else is looked up.
@@ -219,10 +243,10 @@ internal sealed class TaskbarMusicWidgetService
             _overlay is null || _latestMediaState.Title == "No media playing")
             return;
 
-        // Re-fetch instead of a plain lookup: with caches in place the new order
-        // would otherwise answer from whichever source happens to be cached and
-        // the setting would look like it did nothing.
-        StartLyricsLookup(_latestMediaState, refetch: true);
+        // A plain lookup, not a re-fetch: the new order is applied on top of the
+        // caches, so a source that already has lyrics costs no network call.
+        // Only the explicit "Refresh lyrics" command skips the caches.
+        StartLyricsLookup(_latestMediaState);
     }
 
     /// <summary>
@@ -400,9 +424,23 @@ internal sealed class TaskbarMusicWidgetService
         catch (Exception) { /* A failed lyric lookup leaves the metadata visible. */ }
     }
 
+    private void OnStartupChanged(object? sender, bool enabled)
+    {
+        _startWithWindows = enabled;
+        AutostartStore.Set(enabled);
+        SaveSettings();
+    }
+
+    private void OnTranslationChanged(object? sender, bool enabled)
+    {
+        _showTranslation = enabled;
+        SaveSettings();
+    }
+
     private void OnLyricsModeChanged(object? sender, bool enabled)
     {
         _lyricsMode = enabled;
+        SaveSettings();
         if (enabled)
         {
             _lyricsTimer.Stop();

@@ -194,6 +194,10 @@
                 </MenuItem>
                 <MenuItem x:Name="TaskbarMenu" Header="Taskbar"/>
                 <Separator/>
+                <MenuItem x:Name="StartupItem"
+                          Header="Start with Windows"
+                          IsCheckable="True"
+                          Click="OnStartupClick"/>
                 <MenuItem Header="Exit Taskbar Music Widget"
                           Click="OnExitClick"/>
             </ContextMenu>

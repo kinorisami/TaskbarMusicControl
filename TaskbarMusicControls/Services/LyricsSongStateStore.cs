@@ -29,33 +29,23 @@ internal static class LyricsSongStateStore
 
     private static readonly string StateDirectory = LyricsCache.CacheDirectory;
 
-    /// <summary>Directory used by versions that stored the offset on its own.</summary>
-    private static readonly string LegacyOffsetDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "TaskbarMusicControls", "Lyrics", "Offsets");
-
     public static LyricsSongState Load(string trackKey)
     {
         try
         {
             var path = GetPath(trackKey);
-            if (File.Exists(path))
-            {
-                using var stream = File.OpenRead(path);
-                var entry = JsonSerializer.Deserialize<Entry>(stream);
-                if (entry is { Version: >= CurrentVersion })
-                {
-                    return new LyricsSongState(
-                        TimeSpan.FromMilliseconds(Math.Clamp(entry.OffsetMs, -MaxOffsetMs, MaxOffsetMs)),
-                        ParseSource(entry.LockedSource),
-                        ParseSource(entry.LastSource),
-                        entry.FetchedAt);
-                }
-            }
+            if (!File.Exists(path))
+                return LyricsSongState.Empty;
 
-            // Songs that only have the old <hash>.txt offset file keep their
-            // adjustment; the first save moves it into the state file.
-            return LyricsSongState.Empty with { Offset = ReadLegacyOffset(trackKey) };
+            using var stream = File.OpenRead(path);
+            var entry = JsonSerializer.Deserialize<Entry>(stream);
+            return entry is { Version: >= CurrentVersion }
+                ? new LyricsSongState(
+                    TimeSpan.FromMilliseconds(Math.Clamp(entry.OffsetMs, -MaxOffsetMs, MaxOffsetMs)),
+                    ParseSource(entry.LockedSource),
+                    ParseSource(entry.LastSource),
+                    entry.FetchedAt)
+                : LyricsSongState.Empty;
         }
         catch (Exception)
         {
@@ -100,22 +90,6 @@ internal static class LyricsSongStateStore
 
     private static string GetPath(string trackKey) => Path.Combine(
         StateDirectory, LyricsCache.HashTrackKey(trackKey) + ".meta.json");
-
-    private static TimeSpan ReadLegacyOffset(string trackKey)
-    {
-        try
-        {
-            var path = Path.Combine(
-                LegacyOffsetDirectory, LyricsCache.HashTrackKey(trackKey) + ".txt");
-            return File.Exists(path) && int.TryParse(File.ReadAllText(path), out var milliseconds)
-                ? TimeSpan.FromMilliseconds(Math.Clamp(milliseconds, -MaxOffsetMs, MaxOffsetMs))
-                : TimeSpan.Zero;
-        }
-        catch (Exception)
-        {
-            return TimeSpan.Zero;
-        }
-    }
 
     private static LyricsSource? ParseSource(string? value) =>
         Enum.TryParse<LyricsSource>(value, out var source) ? source : null;

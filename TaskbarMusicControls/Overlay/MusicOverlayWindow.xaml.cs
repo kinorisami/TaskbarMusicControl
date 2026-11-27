@@ -65,8 +65,6 @@ public partial class MusicOverlayWindow : Window
     /// </summary>
     private double DrawerRevealHeight => Height > 0 ? Height : 60;
 
-    private static readonly Brush DrawerBackground = CreateFrozenBrush(0xFA, 0xFF, 0xFF, 0xFF);
-    private static readonly Brush DrawerEdge = CreateFrozenBrush(0x22, 0x00, 0x00, 0x00);
     private static readonly Brush AccentBrush = CreateFrozenBrush(0xFF, 0x16, 0x7C, 0x69);
     private static readonly Brush InactiveBrush = CreateFrozenBrush(0xFF, 0x30, 0x34, 0x3A);
     private const string CopyGlyph = "\uE8C8";
@@ -130,6 +128,8 @@ public partial class MusicOverlayWindow : Window
     internal event Action<object?, LyricsSourceSettings>? LyricsSourceSettingsChanged;
     internal event EventHandler? LyricsRefetchRequested;
     internal event Action<object?, bool>? LyricsLockChanged;
+    internal event Action<object?, bool>? TranslationChanged;
+    internal event Action<object?, bool>? StartupChanged;
     internal event Action<object?, TimeSpan>? LyricsOffsetChanged;
     internal event Action<object?, string>? TaskbarSelectionChanged;
     internal event Action<object?, TimeSpan>? SeekRequested;
@@ -473,6 +473,8 @@ public partial class MusicOverlayWindow : Window
         ProgressHit.Visibility = Visibility.Collapsed;
         CopyButton.Visibility = Visibility.Collapsed;
         TranslationButton.Visibility = Visibility.Collapsed;
+        MetadataPanel.BeginAnimation(UIElement.OpacityProperty, null);
+        MetadataPanel.Opacity = 1;
         _seeking = false;
         _drawerOpen = false;
         _drawerHideTimer.Stop();
@@ -486,9 +488,11 @@ public partial class MusicOverlayWindow : Window
     private void PlaceControlsAsDrawer()
     {
         Grid.SetColumn(ControlsReveal, 1);
-        ControlsReveal.Background = DrawerBackground;
-        ControlsReveal.BorderThickness = new Thickness(0, 0, 0, 1);
-        ControlsReveal.BorderBrush = DrawerEdge;
+        // No surface of its own: the taskbar shows through, so the drawer always
+        // matches the taskbar colour whatever the wallpaper does to it. The
+        // lyrics are faded out while it is open, so nothing shows through.
+        ControlsReveal.Background = null;
+        ControlsReveal.BorderThickness = new Thickness(0);
         ControlsReveal.VerticalAlignment = VerticalAlignment.Top;
         DrawerLayout.Margin = new Thickness(10, 0, 10, 0);
         PlaybackControls.HorizontalAlignment = HorizontalAlignment.Right;
@@ -512,7 +516,14 @@ public partial class MusicOverlayWindow : Window
         _drawerOpen = _hoverControlsMode &&
             (ContentArea.IsMouseOver || ControlsReveal.IsMouseOver || IsContextMenuOpen);
         ControlsReveal.BeginAnimation(FrameworkElement.HeightProperty, null);
+        ControlsReveal.BeginAnimation(UIElement.OpacityProperty, null);
         ControlsReveal.Height = _drawerOpen ? DrawerRevealHeight : 0;
+        ControlsReveal.Opacity = 1;
+
+        // The drawer has no background, so the lyrics are hidden while it covers
+        // them instead of showing through it.
+        MetadataPanel.BeginAnimation(UIElement.OpacityProperty, null);
+        MetadataPanel.Opacity = _drawerOpen ? 0 : 1;
         if (_drawerOpen)
         {
             _progressTimer.Start();
@@ -671,12 +682,28 @@ public partial class MusicOverlayWindow : Window
             : _renderedOriginal + Environment.NewLine + _renderedTranslation;
     }
 
+    /// <summary>
+    /// Whether the translation line is shown. Kept in settings.json, so the
+    /// choice survives a restart.
+    /// </summary>
+    internal void SetShowTranslation(bool enabled)
+    {
+        _showTranslation = enabled;
+        UpdateTranslationButton();
+        if (_lyrics is not null)
+            UpdateLyrics(_lyrics, _lastLyricsPosition);
+    }
+
     private void OnTranslationClick(object sender, RoutedEventArgs e)
     {
-        _showTranslation = !_showTranslation;
-        UpdateTranslationButton();
-        UpdateLyrics(_lyrics, _lastLyricsPosition);
+        SetShowTranslation(!_showTranslation);
+        TranslationChanged?.Invoke(this, _showTranslation);
     }
+
+    internal void SetStartWithWindows(bool enabled) => StartupItem.IsChecked = enabled;
+
+    private void OnStartupClick(object sender, RoutedEventArgs e) =>
+        StartupChanged?.Invoke(this, StartupItem.IsChecked);
 
     private void UpdateTranslationButton() =>
         TranslationButton.Foreground = _showTranslation ? AccentBrush : InactiveBrush;
@@ -699,15 +726,36 @@ public partial class MusicOverlayWindow : Window
             _progressTimer.Stop();
         }
 
+        var easing = new CubicEase
+        {
+            EasingMode = open ? EasingMode.EaseOut : EasingMode.EaseIn
+        };
         ControlsReveal.BeginAnimation(
             FrameworkElement.HeightProperty,
             new DoubleAnimation(open ? DrawerRevealHeight : 0,
                 TimeSpan.FromMilliseconds(open ? 180 : 140))
             {
-                EasingFunction = new CubicEase
-                {
-                    EasingMode = open ? EasingMode.EaseOut : EasingMode.EaseIn
-                },
+                EasingFunction = easing,
+                FillBehavior = FillBehavior.HoldEnd
+            });
+
+        // The height alone makes the panel slide over the lyrics as a hard edge;
+        // fading it in at the same time softens that line.
+        ControlsReveal.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(open ? 1 : 0, TimeSpan.FromMilliseconds(open ? 160 : 120))
+            {
+                EasingFunction = easing,
+                FillBehavior = FillBehavior.HoldEnd
+            });
+
+        // The lyrics step aside as the drawer arrives, so the drawer itself needs
+        // no background to hide them.
+        MetadataPanel.BeginAnimation(
+            UIElement.OpacityProperty,
+            new DoubleAnimation(open ? 0 : 1, TimeSpan.FromMilliseconds(open ? 120 : 140))
+            {
+                EasingFunction = easing,
                 FillBehavior = FillBehavior.HoldEnd
             });
     }
