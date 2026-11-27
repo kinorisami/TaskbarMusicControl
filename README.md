@@ -77,6 +77,7 @@ dotnet publish .\TaskbarMusicControls\TaskbarMusicControls.csproj -c Release -r 
 1. 启动支持 Windows 媒体会话的播放器并开始播放。
 2. 启动组件；它会自动检测任务栏并读取当前媒体会话。
 3. 右键任务栏组件切换布局、选择歌词来源、调整歌词偏移、选择任务栏或退出。
+4. 鼠标停在组件上时按住 Ctrl 滚动滚轮，可以按 ±0.2 秒微调当前歌曲的歌词偏移，不必反复打开菜单。
 
 ### 本地歌词
 
