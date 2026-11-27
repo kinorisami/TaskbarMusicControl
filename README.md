@@ -41,11 +41,13 @@
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/39170e90-c827-454b-97fe-f72b75d06370" />
 <img width="2560" height="84" alt="image" src="https://github.com/user-attachments/assets/68f5bed3-bc58-409a-b910-d75494a29516" />
 
-| 布局               | 内容                                                         |
-| ------------------ | ------------------------------------------------------------ |
-| **完整**（默认）   | 歌词铺满整块区域；鼠标移入时，播放控制、进度条、复制与翻译按钮从上方展开。没有歌词时显示歌曲名和艺人。 |
-| **封面与控制按钮** | 封面 +右侧控制列，不显示歌词。                               |
-| **仅封面**         | 只有专辑封面，鼠标悬停时显示播放/暂停按钮。                  |
+
+| 布局 | 内容 |
+|---|---|
+| **完整**（默认） | 歌词铺满整块区域；鼠标移入时，播放控制、进度条、复制与翻译按钮从上方展开。没有歌词时显示歌曲名和艺人。 |
+| **封面与控制按钮** | 封面 +右侧控制列，不显示歌词。 |
+| **仅封面** | 只有专辑封面，鼠标悬停时显示播放/暂停按钮。 |
+
 
 歌词只在**完整**布局下显示：另外两种布局不放歌词按钮，也放不下歌词面板。切换布局不会改变已经打开的歌词开关，切回完整布局时会重新显示歌词。
 
@@ -60,10 +62,10 @@
 
 在 Releases 页面下载发布包，解压后直接运行 `TaskbarMusicControls.exe`，无需安装：
 
-| 发布包                                           | 说明                                                   |
-| ------------------------------------------------ | ------------------------------------------------------ |
+| 发布包 | 说明 |
+|---|---|
 | `TaskbarMusicControls-v1.0.0-win-x64-standalone` | **推荐**。运行时已打包进去，目标机器无需安装任何东西。 |
-| `TaskbarMusicControls-v1.0.0-win-x64-net10`      | 体积更小，但目标机器需要预装 .NET 10 桌面运行时。      |
+| `TaskbarMusicControls-v1.0.0-win-x64-net10` | 体积更小，但目标机器需要预装 .NET 10 桌面运行时。 |
 
 - 同一时刻只允许运行一个实例，重复启动会被拒绝。
 - 如果希望开机自动启动，右键组件（或托盘图标）→ `Start with Windows`。
@@ -75,18 +77,18 @@
 
 右键组件或托盘图标打开：
 
-| 菜单项                      | 作用                                                         |
-| --------------------------- | ------------------------------------------------------------ |
-| `Layout`                    | 切换三种显示布局                                             |
-| `Lyric source`              | `Lock to X` / `Locked to X`：把当前歌曲锁定到某个歌词源（再点一次取消）。`Refresh lyrics (this song)`：重新联网查询当前歌曲。`Local files first`：本地文件优先。`NetEase → LRCLIB` / `LRCLIB → NetEase`：两个在线源的查找顺序 |
-| `Lyric timing (this song)`  | 当前歌曲的歌词偏移：−1.0 s / −0.2 s / +0.2 s / +1.0 s，以及归零 |
-| `Taskbar`                   | 选择挂到哪一台显示器的任务栏                                 |
-| `Block`                     | 选择任务栏上的哪一块空档：图标左侧还是右侧（仅在图标居中时出现） |
-| `Alignment`                 | 在所选空档里贴左端还是右端                                   |
-| `Player`                    | 存在多个播放器时，选择跟踪哪一个（`Follow the current player` 表示跟随系统当前会话） |
-| `Visibility`                | 手动隐藏、无播放时隐藏、暂停超时隐藏；隐藏时会显示当前原因   |
-| `Start with Windows`        | 开机自动启动                                                 |
-| `Exit Taskbar Music Widget` | 退出程序                                                     |
+| 菜单项 | 作用 |
+|---|---|
+| `Layout` | 切换三种显示布局 |
+| `Lyric source` | `Lock to X` / `Locked to X`：把当前歌曲锁定到某个歌词源（再点一次取消）。`Refresh lyrics (this song)`：重新联网查询当前歌曲。`Local files first`：本地文件优先。`NetEase → LRCLIB` / `LRCLIB → NetEase`：两个在线源的查找顺序 |
+| `Lyric timing (this song)` | 当前歌曲的歌词偏移：−1.0 s / −0.2 s / +0.2 s / +1.0 s，以及归零 |
+| `Taskbar` | 选择挂到哪一台显示器的任务栏 |
+| `Block` | 选择任务栏上的哪一块空档：图标左侧还是右侧（仅在图标居中时出现） |
+| `Alignment` | 在所选空档里贴左端还是右端 |
+| `Player` | 存在多个播放器时，选择跟踪哪一个（`Follow the current player` 表示跟随系统当前会话） |
+| `Visibility` | 手动隐藏、无播放时隐藏、暂停超时隐藏；隐藏时会显示当前原因 |
+| `Start with Windows` | 开机自动启动 |
+| `Exit Taskbar Music Widget` | 退出程序 |
 
 ### 托盘图标
 
@@ -168,31 +170,31 @@
 
 全部数据位于 `%LOCALAPPDATA%\TaskbarMusicControls`：
 
-| 路径                                | 内容                                           |
-| ----------------------------------- | ---------------------------------------------- |
-| `settings.json`                     | 全部设置，见下表                               |
-| `Lyrics\`                           | 本地歌词文件，可自行放入                       |
-| `Lyrics\Cache\<hash>.<source>.json` | 在线歌词缓存，每个来源一个文件                 |
-| `Lyrics\Cache\<hash>.meta.json`     | 单曲状态：歌词偏移、锁定的来源、最后使用的来源 |
-| `Logs\`                             | 诊断日志，见下                                 |
+| 路径 | 内容 |
+|---|---|
+| `settings.json` | 全部设置，见下表 |
+| `Lyrics\` | 本地歌词文件，可自行放入 |
+| `Lyrics\Cache\<hash>.<source>.json` | 在线歌词缓存，每个来源一个文件 |
+| `Lyrics\Cache\<hash>.meta.json` | 单曲状态：歌词偏移、锁定的来源、最后使用的来源 |
+| `Logs\` | 诊断日志，见下 |
 
 `settings.json` 字段：
 
-| 字段                             | 含义                                                |
-| -------------------------------- | --------------------------------------------------- |
-| `DisplayMode`                    | 显示布局：`Full` / `CoverAndControls` / `CoverOnly` |
-| `TaskbarDeviceId`                | 选中的任务栏（显示器）                              |
-| `Block`                          | 任务栏空档：`Left` / `Right`                        |
-| `Alignment`                      | 空档内的贴边方式：`Left` / `Right`                  |
-| `TaskbarCentered`                | 自动探测到的任务栏图标对齐方式，只读                |
-| `LyricsPreferLocal`              | 是否本地文件优先                                    |
-| `LyricsOrder`                    | 在线来源顺序：`NeteaseFirst` / `LrclibFirst`        |
-| `LyricsMode` / `ShowTranslation` | 上次的歌词开关与翻译开关                            |
-| `HideWhenIdle`                   | 无播放时隐藏                                        |
-| `ManualHidden`                   | 手动隐藏状态                                        |
-| `PauseHideSeconds`               | 暂停超时隐藏的秒数，`0` 表示关闭                    |
-| `PlayerId`                       | 跟踪的播放器，空表示跟随系统当前会话                |
-| `StartWithWindows`               | 开机自启                                            |
+| 字段 | 含义 |
+|---|---|
+| `DisplayMode` | 显示布局：`Full` / `CoverAndControls` / `CoverOnly` |
+| `TaskbarDeviceId` | 选中的任务栏（显示器） |
+| `Block` | 任务栏空档：`Left` / `Right` |
+| `Alignment` | 空档内的贴边方式：`Left` / `Right` |
+| `TaskbarCentered` | 自动探测到的任务栏图标对齐方式，只读 |
+| `LyricsPreferLocal` | 是否本地文件优先 |
+| `LyricsOrder` | 在线来源顺序：`NeteaseFirst` / `LrclibFirst` |
+| `LyricsMode` / `ShowTranslation` | 上次的歌词开关与翻译开关 |
+| `HideWhenIdle` | 无播放时隐藏 |
+| `ManualHidden` | 手动隐藏状态 |
+| `PauseHideSeconds` | 暂停超时隐藏的秒数，`0` 表示关闭 |
+| `PlayerId` | 跟踪的播放器，空表示跟随系统当前会话 |
+| `StartWithWindows` | 开机自启 |
 
 这是唯一的设置文件：读写都只走它。文件缺少 `Version` 时会被忽略并使用默认值。
 
