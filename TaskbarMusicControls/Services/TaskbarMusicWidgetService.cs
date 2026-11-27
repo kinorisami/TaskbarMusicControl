@@ -10,7 +10,6 @@ internal sealed class TaskbarMusicWidgetService
     private const int TaskbarSettleTicks = 4;
     private readonly TaskbarDetector _taskbarDetector = new();
     private readonly TaskbarLayoutDetector _layoutDetector = new();
-    private readonly TaskbarLayoutMonitor _layoutMonitor = new();
     private readonly TaskbarWindowMonitor _taskbarWindowMonitor = new();
     private readonly MediaSessionService _mediaSessionService = new();
     private readonly LyricsService _lyricsService = new();
@@ -76,7 +75,7 @@ internal sealed class TaskbarMusicWidgetService
         _taskbarRecoveryTimer.Tick += OnTaskbarRecoveryTimerTick;
         _lyricsTimer.Tick += OnLyricsTimerTick;
         _timelineSyncTimer.Tick += OnTimelineSyncTimerTick;
-        _layoutMonitor.LayoutChanged += OnTaskbarLayoutChanged;
+        _taskbarWindowMonitor.LayoutChanged += OnTaskbarLayoutChanged;
         _taskbarWindowMonitor.TaskbarCreated += OnTaskbarCreated;
         _mediaSessionService.StateChanged += OnMediaSessionStateChanged;
     }
@@ -855,10 +854,9 @@ internal sealed class TaskbarMusicWidgetService
 
     private void WatchTaskbar(IntPtr taskbarHandle)
     {
-        if (_watchedTaskbar == taskbarHandle)
-            return;
-
+        // The WinEvent hook in TaskbarWindowMonitor reports taskbar changes for
+        // every taskbar; only the handle is remembered here, to tell later
+        // whether the taskbar is still alive.
         _watchedTaskbar = taskbarHandle;
-        _layoutMonitor.Watch(taskbarHandle);
     }
 }

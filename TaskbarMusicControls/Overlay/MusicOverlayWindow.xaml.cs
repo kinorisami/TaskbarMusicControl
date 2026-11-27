@@ -10,6 +10,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using TaskbarMusicControls.Interop;
 using TaskbarMusicControls.Services;
 
 namespace TaskbarMusicControls.Overlay;
@@ -108,6 +109,7 @@ public partial class MusicOverlayWindow : Window
     private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
     private LyricsSource? _lyricsSource;
     private bool _lyricsLocked;
+    private bool _startWithWindows;
     private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();
     private string _selectedTaskbarDeviceId = "";
     private double _lastAvailableWidth = DefaultWidth;
@@ -336,7 +338,6 @@ public partial class MusicOverlayWindow : Window
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
         ApplyResponsiveLayout(width);
-        UpdateDisplayModeMenuChecks();
     }
 
     public TaskbarPositionResult PositionInAvailableArea(
@@ -462,6 +463,10 @@ public partial class MusicOverlayWindow : Window
         ControlsColumn.Width = new GridLength(columnWidth);
         Grid.SetColumn(ControlsReveal, 2);
         ControlsReveal.BeginAnimation(FrameworkElement.HeightProperty, null);
+        // The drawer fades itself out when it closes; without this the docked
+        // strip would inherit that zero opacity and stay invisible.
+        ControlsReveal.BeginAnimation(UIElement.OpacityProperty, null);
+        ControlsReveal.Opacity = 1;
         ControlsReveal.Height = double.NaN;
         ControlsReveal.Background = null;
         ControlsReveal.BorderThickness = new Thickness(0);
@@ -700,10 +705,7 @@ public partial class MusicOverlayWindow : Window
         TranslationChanged?.Invoke(this, _showTranslation);
     }
 
-    internal void SetStartWithWindows(bool enabled) => StartupItem.IsChecked = enabled;
-
-    private void OnStartupClick(object sender, RoutedEventArgs e) =>
-        StartupChanged?.Invoke(this, StartupItem.IsChecked);
+    internal void SetStartWithWindows(bool enabled) => _startWithWindows = enabled;
 
     private void UpdateTranslationButton() =>
         TranslationButton.Foreground = _showTranslation ? AccentBrush : InactiveBrush;
@@ -810,69 +812,220 @@ public partial class MusicOverlayWindow : Window
         return Math.Min(preferred, availableWidth);
     }
 
-    private void UpdateDisplayModeMenuChecks()
-    {
-        foreach (var item in LayoutMenu.Items.OfType<MenuItem>())
-        {
-            if (Enum.TryParse<WidgetDisplayMode>(item.Tag?.ToString(), out var mode))
-                item.IsChecked = mode == _displayMode;
-        }
-    }
+    // Command ids for the native context menu.
+    private const int CmdDisplayModeBase = 100;
+    private const int CmdLyricsLock = 200;
+    private const int CmdLyricsRefetch = 201;
+    private const int CmdPreferLocal = 202;
+    private const int CmdOrderNeteaseFirst = 203;
+    private const int CmdOrderLrclibFirst = 204;
+    private const int CmdOffsetBase = 300;
+    private const int CmdOffsetReset = 310;
+    private const int CmdTaskbarBase = 400;
+    private const int CmdStartWithWindows = 500;
+    private const int CmdExit = 501;
 
-    private void OnDisplayModeClick(object sender, RoutedEventArgs e)
+    private static readonly int[] OffsetDeltas = [-200, -1000, 200, 1000];
+
+    private bool _menuOpen;
+
+    private bool IsContextMenuOpen => _menuOpen;
+
+    private void OnRootRightButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (sender is not MenuItem item ||
-            !Enum.TryParse<WidgetDisplayMode>(item.Tag?.ToString(), out var mode))
+        if (e.ChangedButton != System.Windows.Input.MouseButton.Right)
             return;
 
-        SetDisplayMode(mode);
-        DisplayModeChanged?.Invoke(this, mode);
-    }
-
-    /// <summary>Mirrors the global setting in the menu.</summary>
-    internal void SetLyricsSourceSettings(LyricsSourceSettings settings)
-    {
-        _lyricsSourceSettings = settings;
-        PreferLocalItem.IsChecked = settings.PreferLocal;
-        NeteaseFirstItem.IsChecked = settings.Order == LyricsOnlineOrder.NeteaseFirst;
-        LrclibFirstItem.IsChecked = settings.Order == LyricsOnlineOrder.LrclibFirst;
-    }
-
-    /// <summary>Shows which source the lyrics on screen came from.</summary>
-    internal void SetLyricsStatus(LyricsSource? source)
-    {
-        _lyricsSource = source;
-        UpdateLockItem();
+        e.Handled = true;
+        var position = PointToScreen(e.GetPosition(this));
+        var command = ShowContextMenu((int)position.X, (int)position.Y);
+        if (command != 0)
+            DispatchMenuCommand(command);
     }
 
     /// <summary>
-    /// A locked song keeps the source its lyrics came from; the settings below
-    /// only apply to songs that follow them.
+    /// Reopening a native menu after a command makes it flash, so repeated
+    /// adjustment uses the wheel instead: Ctrl + wheel moves the lyric offset by
+    /// 0.2 s per notch while the pointer is over the widget.
     /// </summary>
-    internal void SetLyricsLock(bool locked, LyricsSource? source)
+    private void OnRootMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
     {
-        _lyricsLocked = locked;
-        if (source is not null)
-            _lyricsSource = source;
+        if ((System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) == 0)
+            return;
 
-        UpdateLockItem();
-        LyricsLockItem.IsEnabled = _lyricsSource is not null;
-        PreferLocalItem.IsEnabled = !locked;
-        NeteaseFirstItem.IsEnabled = !locked;
-        LrclibFirstItem.IsEnabled = !locked;
+        e.Handled = true;
+        var step = Math.Sign(e.Delta) * 200;
+        ApplyOffset(_lyricsOffset + TimeSpan.FromMilliseconds(step));
     }
 
-    private void UpdateLockItem()
+    /// <summary>
+    /// Builds the menu from the current state and shows it. The menu is rebuilt
+    /// every time instead of being kept in sync, which is what makes the native
+    /// menu cheaper than the WPF one.
+    /// </summary>
+    private int ShowContextMenu(int screenX, int screenY)
     {
-        LyricsLockIcon.Visibility = _lyricsLocked ? Visibility.Visible : Visibility.Collapsed;
-        LyricsLockItem.Header = _lyricsSource switch
+        using var menu = new NativeMenu();
+
+        var layout = menu.AddSubmenu("Layout");
+        AddDisplayMode(layout, "Full layout", WidgetDisplayMode.FullDetails);
+        AddDisplayMode(layout, "Cover and controls", WidgetDisplayMode.CoverAndControls);
+        AddDisplayMode(layout, "Cover only (hover to play/pause)", WidgetDisplayMode.CoverOnly);
+        AddDisplayMode(layout, "Lyrics (controls on hover)", WidgetDisplayMode.LyricsWithHoverControls);
+
+        var source = menu.AddSubmenu("Lyric source");
+        source.AddItem(LockText(), CmdLyricsLock, _lyricsLocked, _lyricsSource is not null);
+        source.AddSeparator();
+        source.AddItem("Refresh lyrics (this song)", CmdLyricsRefetch);
+        source.AddSeparator();
+        source.AddItem("Local files first", CmdPreferLocal,
+            _lyricsSourceSettings.PreferLocal, !_lyricsLocked);
+        source.AddItem("NetEase → LRCLIB", CmdOrderNeteaseFirst,
+            _lyricsSourceSettings.Order == LyricsOnlineOrder.NeteaseFirst, !_lyricsLocked);
+        source.AddItem("LRCLIB → NetEase", CmdOrderLrclibFirst,
+            _lyricsSourceSettings.Order == LyricsOnlineOrder.LrclibFirst, !_lyricsLocked);
+
+        var timing = menu.AddSubmenu("Lyric timing (this song)");
+        timing.AddItem(OffsetText(), 0, isEnabled: false);
+        timing.AddSeparator();
+        for (var i = 0; i < OffsetDeltas.Length; i++)
         {
-            null => "Lock source",
-            var source => _lyricsLocked
-                ? $"Locked to {SourceName(source)}"
-                : $"Lock to {SourceName(source)}"
-        };
+            var delta = OffsetDeltas[i];
+            var label = delta < 0 ? $"Earlier {delta / 1000.0:+0.0;-0.0} s"
+                : $"Later {delta / 1000.0:+0.0;-0.0} s";
+            timing.AddItem(label, CmdOffsetBase + i);
+        }
+
+        timing.AddSeparator();
+        timing.AddItem("Reset (0.0 s)", CmdOffsetReset, isEnabled: _lyricsOffset != TimeSpan.Zero);
+
+        if (_taskbarOptions.Count > 0)
+        {
+            var taskbar = menu.AddSubmenu("Taskbar");
+            for (var i = 0; i < _taskbarOptions.Count; i++)
+            {
+                var option = _taskbarOptions[i];
+                var label = option.IsPrimary ? $"{option.DisplayName} (primary)" : option.DisplayName;
+                taskbar.AddItem(label, CmdTaskbarBase + i,
+                    string.Equals(option.DeviceId, _selectedTaskbarDeviceId, StringComparison.Ordinal));
+            }
+        }
+
+        menu.AddSeparator();
+        menu.AddItem("Start with Windows", CmdStartWithWindows, _startWithWindows);
+        menu.AddItem("Exit Taskbar Music Widget", CmdExit);
+
+        // The menu must be owned by a window of this thread: TrackPopupMenuEx
+        // posts its messages to the owner, and an owner in another process never
+        // receives them, which cancels the menu immediately.
+        var owner = _nativeHandle != 0 ? _nativeHandle : _taskbarHandle;
+        _menuOpen = true;
+        try
+        {
+            return NativeMenu.Show(menu.Handle, owner, screenX, screenY);
+        }
+        finally
+        {
+            _menuOpen = false;
+            // The drawer closes on its own if the pointer is no longer over the
+            // widget once the menu is gone.
+            if (!RootBorder.IsMouseOver)
+                SetDrawerOpen(false);
+        }
     }
+
+    private void AddDisplayMode(NativeMenu menu, string text, WidgetDisplayMode mode) =>
+        menu.AddItem(text, CmdDisplayModeBase + (int)mode, _displayMode == mode);
+
+    private void DispatchMenuCommand(int command)
+    {
+        if (command >= CmdDisplayModeBase && command < CmdDisplayModeBase + 16)
+        {
+            var mode = (WidgetDisplayMode)(command - CmdDisplayModeBase);
+            SetDisplayMode(mode);
+            DisplayModeChanged?.Invoke(this, mode);
+            return;
+        }
+
+        if (command >= CmdOffsetBase && command < CmdOffsetBase + OffsetDeltas.Length)
+        {
+            ApplyOffset(_lyricsOffset + TimeSpan.FromMilliseconds(OffsetDeltas[command - CmdOffsetBase]));
+            return;
+        }
+
+        if (command >= CmdTaskbarBase && command < CmdTaskbarBase + _taskbarOptions.Count)
+        {
+            var deviceId = _taskbarOptions[command - CmdTaskbarBase].DeviceId;
+            if (!string.Equals(deviceId, _selectedTaskbarDeviceId, StringComparison.Ordinal))
+            {
+                _selectedTaskbarDeviceId = deviceId;
+                TaskbarSelectionChanged?.Invoke(this, deviceId);
+            }
+
+            return;
+        }
+
+        switch (command)
+        {
+            case CmdLyricsLock:
+                LyricsLockChanged?.Invoke(this, !_lyricsLocked);
+                break;
+            case CmdLyricsRefetch:
+                LyricsRefetchRequested?.Invoke(this, EventArgs.Empty);
+                break;
+            case CmdPreferLocal:
+                ChangeSourceSettings(_lyricsSourceSettings with
+                {
+                    PreferLocal = !_lyricsSourceSettings.PreferLocal
+                });
+                break;
+            case CmdOrderNeteaseFirst:
+                ChangeSourceSettings(_lyricsSourceSettings with
+                {
+                    Order = LyricsOnlineOrder.NeteaseFirst
+                });
+                break;
+            case CmdOrderLrclibFirst:
+                ChangeSourceSettings(_lyricsSourceSettings with
+                {
+                    Order = LyricsOnlineOrder.LrclibFirst
+                });
+                break;
+            case CmdOffsetReset:
+                ApplyOffset(TimeSpan.Zero);
+                break;
+            case CmdStartWithWindows:
+                _startWithWindows = !_startWithWindows;
+                StartupChanged?.Invoke(this, _startWithWindows);
+                break;
+            case CmdExit:
+                ExitWidget();
+                break;
+        }
+    }
+
+    private void ChangeSourceSettings(LyricsSourceSettings settings)
+    {
+        if (_lyricsSourceSettings == settings)
+            return;
+
+        _lyricsSourceSettings = settings;
+        LyricsSourceSettingsChanged?.Invoke(this, settings);
+    }
+
+    private void ApplyOffset(TimeSpan offset)
+    {
+        SetLyricsOffset(offset);
+        LyricsOffsetChanged?.Invoke(this, _lyricsOffset);
+    }
+
+    private string LockText() => _lyricsSource switch
+    {
+        null => "Lock source",
+        var source => _lyricsLocked
+            ? $"Locked to {SourceName(source)}"
+            : $"Lock to {SourceName(source)}"
+    };
 
     private static string SourceName(LyricsSource? source) => source switch
     {
@@ -882,151 +1035,44 @@ public partial class MusicOverlayWindow : Window
         _ => "-"
     };
 
-    private void OnLyricsRefetchClick(object sender, RoutedEventArgs e) =>
-        LyricsRefetchRequested?.Invoke(this, EventArgs.Empty);
-
-    private void OnLyricsLockClick(object sender, RoutedEventArgs e) =>
-        LyricsLockChanged?.Invoke(this, !_lyricsLocked);
-
-    private void OnPreferLocalClick(object sender, RoutedEventArgs e)
-    {
-        var settings = _lyricsSourceSettings with { PreferLocal = PreferLocalItem.IsChecked };
-        SetLyricsSourceSettings(settings);
-        LyricsSourceSettingsChanged?.Invoke(this, settings);
-    }
-
-    private void OnOnlineOrderClick(object sender, RoutedEventArgs e)
-    {
-        var order = ReferenceEquals(sender, LrclibFirstItem)
-            ? LyricsOnlineOrder.LrclibFirst
-            : LyricsOnlineOrder.NeteaseFirst;
-        var settings = _lyricsSourceSettings with { Order = order };
-        SetLyricsSourceSettings(settings);
-        LyricsSourceSettingsChanged?.Invoke(this, settings);
-    }
-
-    /// <summary>How far the lyric offset can be pushed in either direction.</summary>
-    private const int MaxOffsetMs = 15000;
-
-    internal void SetLyricsOffset(TimeSpan offset)
-    {
-        _lyricsOffset = ClampOffset(offset);
-        UpdateOffsetStatus();
-        if (_lyrics is not null)
-            UpdateLyrics(_lyrics, _lastLyricsPosition);
-    }
-
-    private void UpdateOffsetStatus()
+    private string OffsetText()
     {
         var seconds = _lyricsOffset.TotalSeconds;
         var text = seconds == 0
             ? "0.0 s"
             : seconds.ToString("+0.0;-0.0", CultureInfo.InvariantCulture) + " s";
-        LyricsOffsetStatus.Header = $"Current: {text}";
-        LyricsOffsetReset.IsEnabled = seconds != 0;
+        return $"Current: {text}";
     }
 
-    private static TimeSpan ClampOffset(TimeSpan offset) => TimeSpan.FromMilliseconds(
-        Math.Clamp((int)offset.TotalMilliseconds, -MaxOffsetMs, MaxOffsetMs));
+    /// <summary>How far the lyric offset can be pushed in either direction.</summary>
+    private const int MaxOffsetMs = 15000;
 
-    private void OnLyricsOffsetClick(object sender, RoutedEventArgs e)
+    internal void SetLyricsSourceSettings(LyricsSourceSettings settings) => _lyricsSourceSettings = settings;
+
+    internal void SetLyricsStatus(LyricsSource? source) => _lyricsSource = source;
+
+    internal void SetLyricsLock(bool locked, LyricsSource? source)
     {
-        if (sender is not MenuItem item ||
-            !int.TryParse(item.Tag?.ToString(), out var deltaMs))
-            return;
-
-        // The menu stays open, so every click adds to what is already set
-        // instead of replacing it.
-        SetLyricsOffset(_lyricsOffset + TimeSpan.FromMilliseconds(deltaMs));
-        LyricsOffsetChanged?.Invoke(this, _lyricsOffset);
+        _lyricsLocked = locked;
+        if (source is not null)
+            _lyricsSource = source;
     }
 
-    private void OnLyricsOffsetResetClick(object sender, RoutedEventArgs e)
+    internal void SetLyricsOffset(TimeSpan offset)
     {
-        SetLyricsOffset(TimeSpan.Zero);
-        LyricsOffsetChanged?.Invoke(this, TimeSpan.Zero);
+        _lyricsOffset = TimeSpan.FromMilliseconds(
+            Math.Clamp((int)offset.TotalMilliseconds, -MaxOffsetMs, MaxOffsetMs));
+        if (_lyrics is not null)
+            UpdateLyrics(_lyrics, _lastLyricsPosition);
     }
 
-    internal void SetTaskbarOptions(
-        IReadOnlyList<TaskbarOption> options,
-        string selectedDeviceId)
+    internal void SetTaskbarOptions(IReadOnlyList<TaskbarOption> options, string selectedDeviceId)
     {
-        var optionsChanged = !TaskbarOptionsEqual(_taskbarOptions, options);
         _taskbarOptions = options;
         _selectedTaskbarDeviceId = selectedDeviceId;
-        if (optionsChanged)
-            RebuildTaskbarMenu();
-        else
-            UpdateTaskbarMenuChecks();
     }
 
-    internal void SetTaskbarSelection(string selectedDeviceId)
-    {
-        _selectedTaskbarDeviceId = selectedDeviceId;
-        UpdateTaskbarMenuChecks();
-    }
-
-    private void RebuildTaskbarMenu()
-    {
-        if (TaskbarMenu is null)
-            return;
-
-        TaskbarMenu.Visibility = _taskbarOptions.Count > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        TaskbarMenu.Items.Clear();
-        foreach (var option in _taskbarOptions)
-        {
-            var item = new MenuItem
-            {
-                Header = option.IsPrimary
-                    ? $"{option.DisplayName} (primary)"
-                    : option.DisplayName,
-                Tag = option.DeviceId,
-                IsCheckable = true,
-                IsChecked = string.Equals(option.DeviceId, _selectedTaskbarDeviceId,
-                    StringComparison.Ordinal)
-            };
-            item.Click += OnTaskbarClick;
-            TaskbarMenu.Items.Add(item);
-        }
-    }
-
-    private void OnTaskbarClick(object sender, RoutedEventArgs e)
-    {
-        if (sender is not MenuItem { Tag: string deviceId })
-            return;
-
-        _selectedTaskbarDeviceId = deviceId;
-        UpdateTaskbarMenuChecks();
-        TaskbarSelectionChanged?.Invoke(this, deviceId);
-    }
-
-    private void UpdateTaskbarMenuChecks()
-    {
-        foreach (var item in TaskbarMenu?.Items.OfType<MenuItem>() ?? [])
-        {
-            item.IsChecked = string.Equals(item.Tag?.ToString(), _selectedTaskbarDeviceId,
-                StringComparison.Ordinal);
-        }
-    }
-
-    private static bool TaskbarOptionsEqual(
-        IReadOnlyList<TaskbarOption> left,
-        IReadOnlyList<TaskbarOption> right)
-    {
-        if (left.Count != right.Count)
-            return false;
-
-        for (var i = 0; i < left.Count; i++)
-        {
-            if (!string.Equals(left[i].DeviceId, right[i].DeviceId, StringComparison.Ordinal) ||
-                !string.Equals(left[i].DisplayName, right[i].DisplayName, StringComparison.Ordinal) ||
-                left[i].IsPrimary != right[i].IsPrimary)
-                return false;
-        }
-        return true;
-    }
+    internal void SetTaskbarSelection(string selectedDeviceId) => _selectedTaskbarDeviceId = selectedDeviceId;
 
     private void SetHoverPlaybackOnlyMode(bool enabled)
     {
@@ -1093,18 +1139,6 @@ public partial class MusicOverlayWindow : Window
         if (!IsContextMenuOpen)
             HoverPlaybackButton.Visibility = Visibility.Collapsed;
     }
-
-    private void OnContextMenuClosed(object sender, RoutedEventArgs e)
-    {
-        if (_hoverPlaybackOnlyMode)
-            HoverPlaybackButton.Visibility = Artwork.IsMouseOver
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-        if (!ContentArea.IsMouseOver && !ControlsReveal.IsMouseOver)
-            SetDrawerOpen(false);
-    }
-
-    private bool IsContextMenuOpen => RootBorder.ContextMenu?.IsOpen == true;
 
     private void OnHoverPlaybackClick(object sender, RoutedEventArgs e) =>
         ToggleRequested?.Invoke(this, EventArgs.Empty);
@@ -1377,15 +1411,7 @@ public partial class MusicOverlayWindow : Window
         LyricsModeChanged?.Invoke(this, _lyricsMode);
     }
 
-    private void OnExitClick(object sender, RoutedEventArgs e)
-    {
-        // Close the context menu before closing the window; otherwise the popup
-        // can stay visible for a few seconds while WPF tears down the app.
-        if (RootBorder.ContextMenu is { IsOpen: true } menu)
-            menu.IsOpen = false;
-
-        Close();
-    }
+    internal void ExitWidget() => Close();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect(int left, int top, int right, int bottom)

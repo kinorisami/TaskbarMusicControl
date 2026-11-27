@@ -65,19 +65,24 @@ internal sealed class MediaSessionService
         }
     }
 
-    public Task SkipPreviousAsync() => RunCommandAsync(session => session.TrySkipPreviousAsync());
+    // GSMTC is a synchronous COM call into the player: when the player is busy -
+    // which is exactly when a track changes - it blocks the calling thread for
+    // hundreds of milliseconds. Everything that talks to the session therefore
+    // runs on the thread pool, never on the UI thread.
+    public Task SkipPreviousAsync() =>
+        Task.Run(() => RunCommandAsync(session => session.TrySkipPreviousAsync()));
 
     public Task RefreshTimelineNowAsync()
     {
         var session = _session;
-        return session is null
-            ? Task.CompletedTask
-            : RefreshTimelineAsync(session);
+        return session is null ? Task.CompletedTask : Task.Run(() => RefreshTimelineAsync(session));
     }
 
-    public Task TogglePlaybackAsync() => RunCommandAsync(session => session.TryTogglePlayPauseAsync());
+    public Task TogglePlaybackAsync() =>
+        Task.Run(() => RunCommandAsync(session => session.TryTogglePlayPauseAsync()));
 
-    public Task SkipNextAsync() => RunCommandAsync(session => session.TrySkipNextAsync());
+    public Task SkipNextAsync() =>
+        Task.Run(() => RunCommandAsync(session => session.TrySkipNextAsync()));
 
     /// <summary>
     /// Brings the window of the player behind the current session to the front.
@@ -111,7 +116,9 @@ internal sealed class MediaSessionService
         }
     }
 
-    public async Task SeekAsync(TimeSpan position)
+    public Task SeekAsync(TimeSpan position) => Task.Run(() => SeekCoreAsync(position));
+
+    private async Task SeekCoreAsync(TimeSpan position)
     {
         var session = _session;
         if (session is null)
@@ -158,27 +165,27 @@ internal sealed class MediaSessionService
     private void OnCurrentSessionChanged(
         GlobalSystemMediaTransportControlsSessionManager sender,
         CurrentSessionChangedEventArgs args) =>
-        _ = RefreshCurrentSessionAsync();
+        _ = Task.Run(() => RefreshCurrentSessionAsync());
 
     private void OnSessionsChanged(
         GlobalSystemMediaTransportControlsSessionManager sender,
         SessionsChangedEventArgs args) =>
-        _ = RefreshCurrentSessionAsync();
+        _ = Task.Run(() => RefreshCurrentSessionAsync());
 
     private void OnMediaPropertiesChanged(
         GlobalSystemMediaTransportControlsSession sender,
         MediaPropertiesChangedEventArgs args) =>
-        _ = RefreshMediaPropertiesAsync(sender);
+        _ = Task.Run(() => RefreshMediaPropertiesAsync(sender));
 
     private void OnPlaybackInfoChanged(
         GlobalSystemMediaTransportControlsSession sender,
         PlaybackInfoChangedEventArgs args) =>
-        _ = RefreshPlaybackInfoAsync(sender);
+        _ = Task.Run(() => RefreshPlaybackInfoAsync(sender));
 
     private void OnTimelinePropertiesChanged(
         GlobalSystemMediaTransportControlsSession sender,
         TimelinePropertiesChangedEventArgs args) =>
-        _ = RefreshTimelineAsync(sender);
+        _ = Task.Run(() => RefreshTimelineAsync(sender));
 
     private async Task RefreshCurrentSessionAsync()
     {
