@@ -1,5 +1,7 @@
 # Taskbar Music Controls
 
+**中文** | [English](README.en.md)
+
 一个运行在 Windows 任务栏上的轻量音乐控制与歌词组件。它通过 Windows Global System Media Transport Controls（GSMTC）读取当前媒体会话，把播放控制、歌曲信息和歌词直接画进任务栏，不占用桌面空间，也不需要切换窗口。
 
 ## 功能
