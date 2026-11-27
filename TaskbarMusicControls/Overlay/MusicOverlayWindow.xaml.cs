@@ -1588,7 +1588,14 @@ public partial class MusicOverlayWindow : Window
         LyricsModeChanged?.Invoke(this, _lyricsMode);
     }
 
-    internal void ExitWidget() => Close();
+    /// <summary>True when the window is closing because the user chose Exit.</summary>
+    internal bool ExitRequested { get; private set; }
+
+    internal void ExitWidget()
+    {
+        ExitRequested = true;
+        Close();
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect(int left, int top, int right, int bottom)

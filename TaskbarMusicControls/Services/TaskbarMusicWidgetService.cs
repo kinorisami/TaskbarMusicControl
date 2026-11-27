@@ -57,6 +57,7 @@ internal sealed class TaskbarMusicWidgetService
     private bool _lyricsMode;
     private bool _showTranslation = true;
     private bool _startWithWindows;
+    private bool _exitRequested;
     private WidgetBlock _block = WidgetBlock.Right;
     private WidgetAlignment _alignment = WidgetAlignment.Right;
     private bool _taskbarCentered;
@@ -1024,6 +1025,32 @@ internal sealed class TaskbarMusicWidgetService
     }
 
     private void OnOverlayClosed(object? sender, EventArgs e)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted)
+            return;
+
+        // The window is a child of the taskbar, so it is destroyed together with
+        // it: turning off the monitor that hosts the taskbar, or restarting
+        // Explorer, closes the widget as well. Only the Exit command means the
+        // widget itself should end; anything else re-attaches to a taskbar that
+        // still exists.
+        if (_exitRequested || sender is MusicOverlayWindow { ExitRequested: true })
+        {
+            _exitRequested = true;
+            Shutdown();
+            return;
+        }
+
+        TaskbarLayoutDiagnostics.Write(
+            "overlay was closed with its taskbar: looking for another one");
+        if (ReferenceEquals(_overlay, sender))
+            _overlay = null;
+
+        _ = RefreshTaskbarLayoutAsync();
+    }
+
+    private void Shutdown()
     {
         _layoutTimer.Stop();
         _layoutChangeTimer.Stop();
