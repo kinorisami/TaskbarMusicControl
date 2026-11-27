@@ -12,11 +12,16 @@ internal sealed record WidgetSettings(
     LyricsSourceSettings LyricsSources,
     bool LyricsMode,
     bool ShowTranslation,
-    bool StartWithWindows)
+    bool StartWithWindows,
+    WidgetBlock Block,
+    WidgetAlignment Alignment,
+    bool TaskbarCentered)
 {
     public static WidgetSettings Default { get; } = new(
         WidgetDisplayMode.FullDetails, "", LyricsSourceSettings.Default,
-        LyricsMode: false, ShowTranslation: true, StartWithWindows: false);
+        LyricsMode: false, ShowTranslation: true, StartWithWindows: false,
+        Block: WidgetBlock.Right, Alignment: WidgetAlignment.Right,
+        TaskbarCentered: false);
 }
 
 /// <summary>
@@ -65,7 +70,10 @@ internal static class WidgetSettingsStore
                 entry.LyricsOrder is null ||
                 entry.LyricsMode is null ||
                 entry.ShowTranslation is null ||
-                entry.StartWithWindows is null;
+                entry.StartWithWindows is null ||
+                entry.Block is null ||
+                entry.Alignment is null ||
+                entry.TaskbarCentered is null;
 
             return new WidgetSettings(
                 entry.DisplayMode is { } mode && Enum.IsDefined(mode)
@@ -77,7 +85,14 @@ internal static class WidgetSettingsStore
                     entry.LyricsOrder ?? LyricsOnlineOrder.NeteaseFirst),
                 entry.LyricsMode ?? false,
                 entry.ShowTranslation ?? true,
-                entry.StartWithWindows ?? false);
+                entry.StartWithWindows ?? false,
+                entry.Block is { } block && Enum.IsDefined(block)
+                    ? block
+                    : WidgetBlock.Right,
+                entry.Alignment is { } alignment && Enum.IsDefined(alignment)
+                    ? alignment
+                    : WidgetAlignment.Right,
+                entry.TaskbarCentered ?? false);
         }
         catch (Exception)
         {
@@ -104,7 +119,10 @@ internal static class WidgetSettingsStore
                         LyricsOrder = settings.LyricsSources.Order,
                         LyricsMode = settings.LyricsMode,
                         ShowTranslation = settings.ShowTranslation,
-                        StartWithWindows = settings.StartWithWindows
+                        StartWithWindows = settings.StartWithWindows,
+                        Block = settings.Block,
+                        Alignment = settings.Alignment,
+                        TaskbarCentered = settings.TaskbarCentered
                     }, Options);
                 }
 
@@ -136,5 +154,8 @@ internal static class WidgetSettingsStore
         public bool? LyricsMode { get; set; }
         public bool? ShowTranslation { get; set; }
         public bool? StartWithWindows { get; set; }
+        public WidgetBlock? Block { get; set; }
+        public WidgetAlignment? Alignment { get; set; }
+        public bool? TaskbarCentered { get; set; }
     }
 }

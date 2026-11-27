@@ -15,6 +15,25 @@ using TaskbarMusicControls.Services;
 
 namespace TaskbarMusicControls.Overlay;
 
+/// <summary>
+/// Which block of free space on the taskbar the widget uses. With centred icons
+/// there are two: one left of the task buttons and one right of them.
+/// </summary>
+public enum WidgetBlock
+{
+    /// <summary>The space right of the task buttons, up to the notification area.</summary>
+    Right,
+    /// <summary>The space left of the task buttons, up to the taskbar's left edge.</summary>
+    Left
+}
+
+/// <summary>Which end of the chosen block the widget is anchored to.</summary>
+public enum WidgetAlignment
+{
+    Right,
+    Left
+}
+
 internal enum WidgetDisplayMode
 {
     FullDetails,
@@ -110,6 +129,12 @@ public partial class MusicOverlayWindow : Window
     private LyricsSource? _lyricsSource;
     private bool _lyricsLocked;
     private bool _startWithWindows;
+    private WidgetBlock _block = WidgetBlock.Right;
+    private WidgetAlignment _alignment = WidgetAlignment.Right;
+    private bool _taskbarCentered;
+    private Rect _taskbarBounds;
+    private Rect _availableBounds;
+    private Rect _leftBlockBounds;
     private IReadOnlyList<TaskbarOption> _taskbarOptions = Array.Empty<TaskbarOption>();
     private string _selectedTaskbarDeviceId = "";
     private double _lastAvailableWidth = DefaultWidth;
@@ -136,6 +161,14 @@ public partial class MusicOverlayWindow : Window
     internal event Action<object?, string>? TaskbarSelectionChanged;
     internal event Action<object?, TimeSpan>? SeekRequested;
     internal event EventHandler? PlayerActivateRequested;
+    internal event Action<object?, WidgetAlignment>? AlignmentChanged;
+    internal event Action<object?, WidgetBlock>? BlockChanged;
+
+    /// <summary>
+    /// Raised when the taskbar icons switch between centred and left aligned,
+    /// which decides whether a second block exists at all.
+    /// </summary>
+    internal event Action<object?, bool>? TaskbarCenteredChanged;
 
     public bool HasValidNativeHandle =>
         _nativeHandle != 0 && IsWindow(_nativeHandle);
@@ -334,7 +367,7 @@ public partial class MusicOverlayWindow : Window
     internal void SetDisplayMode(WidgetDisplayMode mode)
     {
         _displayMode = mode;
-        var width = GetEffectiveWidth(_lastAvailableWidth);
+        var width = GetEffectiveWidth(_lastAvailableWidth, _lastAvailableWidth);
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
         ApplyResponsiveLayout(width);
@@ -343,30 +376,58 @@ public partial class MusicOverlayWindow : Window
     public TaskbarPositionResult PositionInAvailableArea(
         nint taskbarHandle,
         Rect taskbarBounds,
-        Rect availableBounds)
+        Rect availableBounds,
+        Rect leftBlockBounds = default,
+        bool centered = false)
     {
+        if (centered != _taskbarCentered)
+        {
+            _taskbarCentered = centered;
+            TaskbarCenteredChanged?.Invoke(this, centered);
+        }
+
         if (availableBounds.IsEmpty || availableBounds.Width <= 0 ||
             taskbarBounds.Height <= 0)
             return TaskbarPositionResult.NoSpace;
 
         var dpi = GetDpiScale(taskbarHandle);
-        var availableWidth = availableBounds.Width / dpi.DpiScaleX;
+        _leftBlockBounds = leftBlockBounds;
+        _availableBounds = availableBounds;
+
+        // Two blocks of free space exist when the taskbar icons are centred: one
+        // left of the task list and one right of it. The block setting picks one
+        // and the alignment setting picks the end of it - the taskbar corner or
+        // the icon edge on the left, the icon edge or the notification area on
+        // the right.
+        var useLeftBlock = _block == WidgetBlock.Left &&
+            !leftBlockBounds.IsEmpty &&
+            leftBlockBounds.Width >= MinimumWidth * dpi.DpiScaleX;
+        var block = useLeftBlock ? leftBlockBounds : availableBounds;
+
+        var availableWidth = block.Width / dpi.DpiScaleX;
+        var previousWidth = _lastAvailableWidth;
         _lastAvailableWidth = availableWidth;
-        var width = GetEffectiveWidth(availableWidth);
+        var width = GetEffectiveWidth(availableWidth, previousWidth);
         if (width < MinimumWidth)
             return TaskbarPositionResult.NoSpace;
 
         TaskbarLayoutDiagnostics.Write(
-            $"place: width={width:F1} (current {Width:F1}) layoutMode={_responsiveLayoutWidth:F1}");
+            $"place: width={width:F1} (current {Width:F1}) layoutMode={_responsiveLayoutWidth:F1} " +
+            $"block={(useLeftBlock ? "left" : "right")} align={_alignment} " +
+            $"avail={availableWidth:F1} prev={previousWidth:F1} " +
+            $"mode={_displayMode} effective={GetEffectiveMode(availableWidth, previousWidth)}");
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
         if (Math.Abs(_responsiveLayoutWidth - width) > 0.5)
             ApplyResponsiveLayout(width);
         _taskbarHandle = taskbarHandle;
+        _taskbarBounds = taskbarBounds;
 
         var physicalWidth = width * dpi.DpiScaleX;
         var physicalHeight = Height * dpi.DpiScaleY;
-        var physicalLeft = availableBounds.Right - physicalWidth;
+        var physicalLeft = _alignment == WidgetAlignment.Left
+            ? block.Left
+            : block.Right - physicalWidth;
         var physicalTop = taskbarBounds.Top +
             (taskbarBounds.Height - physicalHeight) / 2;
 
@@ -424,7 +485,7 @@ public partial class MusicOverlayWindow : Window
     private void ApplyResponsiveLayout(double width)
     {
         _responsiveLayoutWidth = width;
-        var effectiveMode = GetEffectiveMode(width);
+        var effectiveMode = GetEffectiveMode(width, width);
         _hoverControlsMode = effectiveMode == WidgetDisplayMode.LyricsWithHoverControls;
 
         if (effectiveMode == WidgetDisplayMode.CoverOnly)
@@ -822,18 +883,25 @@ public partial class MusicOverlayWindow : Window
     /// </summary>
     private const double ModeHysteresis = 16;
 
-    private WidgetDisplayMode GetEffectiveMode(double availableWidth)
+    private WidgetDisplayMode GetEffectiveMode(double availableWidth, double previousWidth)
     {
         var mode = _displayMode;
         var current = _responsiveLayoutWidth >= 0
             ? ModeAtWidth(_responsiveLayoutWidth, mode)
             : mode;
 
-        var coverOnlyCeiling = current == WidgetDisplayMode.CoverOnly
+        // The margin only applies to small steps, which is what the shell's
+        // animation produces. A real change - a different block, a window
+        // closing - goes past the thresholds immediately instead of needing a
+        // second refresh to grow out of the compact layout.
+        var damped = Math.Abs(availableWidth - previousWidth) <= ModeHysteresis;
+
+        var coverOnlyCeiling = damped && current == WidgetDisplayMode.CoverOnly
             ? TransportLayoutWidth + ModeHysteresis
             : TransportLayoutWidth;
-        var fullCeiling =
-            current is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls
+        var fullCeiling = !damped
+            ? DefaultWidth
+            : current is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls
                 ? DefaultWidth - ModeHysteresis
                 : DefaultWidth + ModeHysteresis;
 
@@ -857,9 +925,9 @@ public partial class MusicOverlayWindow : Window
         return mode;
     }
 
-    private double GetEffectiveWidth(double availableWidth)
+    private double GetEffectiveWidth(double availableWidth, double previousWidth)
     {
-        var preferred = GetEffectiveMode(availableWidth) switch
+        var preferred = GetEffectiveMode(availableWidth, previousWidth) switch
         {
             WidgetDisplayMode.CoverOnly => MinimumWidth,
             WidgetDisplayMode.CoverAndControls => TransportLayoutWidth,
@@ -880,6 +948,10 @@ public partial class MusicOverlayWindow : Window
     private const int CmdTaskbarBase = 400;
     private const int CmdStartWithWindows = 500;
     private const int CmdExit = 501;
+    private const int CmdAlignLeft = 600;
+    private const int CmdAlignRight = 601;
+    private const int CmdBlockLeft = 610;
+    private const int CmdBlockRight = 611;
 
     private static readonly int[] OffsetDeltas = [-200, -1000, 200, 1000];
 
@@ -966,6 +1038,19 @@ public partial class MusicOverlayWindow : Window
                     string.Equals(option.DeviceId, _selectedTaskbarDeviceId, StringComparison.Ordinal));
             }
         }
+
+        // Only centred taskbar icons leave a second block to choose from; with
+        // left aligned icons there is a single block and nothing to pick.
+        if (_taskbarCentered)
+        {
+            var block = menu.AddSubmenu("Block");
+            block.AddItem("Left of the task buttons", CmdBlockLeft, _block == WidgetBlock.Left);
+            block.AddItem("Right of the task buttons", CmdBlockRight, _block == WidgetBlock.Right);
+        }
+
+        var alignment = menu.AddSubmenu("Alignment");
+        alignment.AddItem("Left", CmdAlignLeft, _alignment == WidgetAlignment.Left);
+        alignment.AddItem("Right", CmdAlignRight, _alignment == WidgetAlignment.Right);
 
         menu.AddSeparator();
         menu.AddItem("Start with Windows", CmdStartWithWindows, _startWithWindows);
@@ -1059,6 +1144,18 @@ public partial class MusicOverlayWindow : Window
             case CmdOffsetReset:
                 ApplyOffset(TimeSpan.Zero);
                 break;
+            case CmdBlockLeft:
+                ChangeBlock(WidgetBlock.Left);
+                break;
+            case CmdBlockRight:
+                ChangeBlock(WidgetBlock.Right);
+                break;
+            case CmdAlignLeft:
+                ChangeAlignment(WidgetAlignment.Left);
+                break;
+            case CmdAlignRight:
+                ChangeAlignment(WidgetAlignment.Right);
+                break;
             case CmdStartWithWindows:
                 _startWithWindows = !_startWithWindows;
                 StartupChanged?.Invoke(this, _startWithWindows);
@@ -1122,6 +1219,34 @@ public partial class MusicOverlayWindow : Window
         if (source is not null)
             _lyricsSource = source;
     }
+
+    internal void SetBlock(WidgetBlock block) => _block = block;
+
+    internal void SetAlignment(WidgetAlignment alignment) => _alignment = alignment;
+
+    private void ChangeBlock(WidgetBlock block)
+    {
+        if (_block == block)
+            return;
+
+        _block = block;
+        Reposition();
+        BlockChanged?.Invoke(this, block);
+    }
+
+    private void ChangeAlignment(WidgetAlignment alignment)
+    {
+        if (_alignment == alignment)
+            return;
+
+        _alignment = alignment;
+        Reposition();
+        AlignmentChanged?.Invoke(this, alignment);
+    }
+
+    private void Reposition() => PositionInAvailableArea(
+        _taskbarHandle, _taskbarBounds, _availableBounds, _leftBlockBounds,
+        _taskbarCentered);
 
     internal void SetLyricsOffset(TimeSpan offset)
     {

@@ -57,6 +57,9 @@ internal sealed class TaskbarMusicWidgetService
     private bool _lyricsMode;
     private bool _showTranslation = true;
     private bool _startWithWindows;
+    private WidgetBlock _block = WidgetBlock.Right;
+    private WidgetAlignment _alignment = WidgetAlignment.Right;
+    private bool _taskbarCentered;
     private WidgetDisplayMode _displayMode = WidgetDisplayMode.FullDetails;
     private LyricsSourceSettings _lyricsSourceSettings = LyricsSourceSettings.Default;
     private TimeSpan _lyricsOffset;
@@ -65,6 +68,8 @@ internal sealed class TaskbarMusicWidgetService
     private IntPtr _positionedTaskbar;
     private Rect _positionedTaskbarBounds;
     private Rect _positionedAvailableBounds;
+    private Rect _positionedLeftBlockBounds;
+    private bool _positionedCentered;
     private bool _forceReposition;
     private bool _taskbarTemporarilyMissing;
     private int _taskbarSettleTicks;
@@ -98,6 +103,9 @@ internal sealed class TaskbarMusicWidgetService
         _lyricsMode = settings.LyricsMode;
         _showTranslation = settings.ShowTranslation;
         _startWithWindows = settings.StartWithWindows;
+        _block = settings.Block;
+        _alignment = settings.Alignment;
+        _taskbarCentered = settings.TaskbarCentered;
 
         // Only when the file was missing or a key was absent: the defaults of the
         // new keys are written once, not on every start.
@@ -145,7 +153,9 @@ internal sealed class TaskbarMusicWidgetService
         var position = overlay.PositionInAvailableArea(
             taskbarHandle,
             layout.TaskbarBounds,
-            layout.AvailableBounds);
+            layout.AvailableBounds,
+            layout.LeftBlockBounds,
+            layout.Centered);
         if (position != TaskbarPositionResult.Positioned)
         {
             ReportPositionFailure(position, taskbarHandle);
@@ -164,6 +174,9 @@ internal sealed class TaskbarMusicWidgetService
             _ = _mediaSessionService.SeekAsync(position);
         overlay.PlayerActivateRequested += (_, _) =>
             _mediaSessionService.TogglePlayerWindow();
+        overlay.BlockChanged += OnBlockChanged;
+        overlay.AlignmentChanged += OnAlignmentChanged;
+        overlay.TaskbarCenteredChanged += OnTaskbarCenteredChanged;
         overlay.LyricsModeChanged += OnLyricsModeChanged;
         overlay.LyricsSourceSettingsChanged += OnLyricsSourceSettingsChanged;
         overlay.LyricsLockChanged += OnLyricsLockChanged;
@@ -181,13 +194,17 @@ internal sealed class TaskbarMusicWidgetService
         overlay.SetLyricsMode(_lyricsMode);
         overlay.SetShowTranslation(_showTranslation);
         overlay.SetStartWithWindows(_startWithWindows);
+        overlay.SetBlock(_block);
+        overlay.SetAlignment(_alignment);
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
         ApplyMediaState(overlay, state);
         overlay.Show();
         var finalPosition = overlay.PositionInAvailableArea(
             taskbarHandle,
             layout.TaskbarBounds,
-            layout.AvailableBounds);
+            layout.AvailableBounds,
+            layout.LeftBlockBounds,
+            layout.Centered);
         if (finalPosition != TaskbarPositionResult.Positioned)
             ReportPositionFailure(finalPosition, taskbarHandle);
         overlay.Dispatcher.BeginInvoke(
@@ -197,6 +214,9 @@ internal sealed class TaskbarMusicWidgetService
         _positionedTaskbar = taskbarHandle;
         _positionedTaskbarBounds = layout.TaskbarBounds;
         _positionedAvailableBounds = layout.AvailableBounds;
+        _positionedLeftBlockBounds = layout.LeftBlockBounds;
+        _positionedCentered = layout.Centered;
+        RememberTaskbarCentered(layout.Centered);
 
         Application.Current.MainWindow = overlay;
         return true;
@@ -205,7 +225,8 @@ internal sealed class TaskbarMusicWidgetService
     /// <summary>Writes every setting, so the file always holds the full state.</summary>
     private void SaveSettings() => WidgetSettingsStore.Save(new WidgetSettings(
         _displayMode, _selectedTaskbarDeviceId, _lyricsSourceSettings,
-        _lyricsMode, _showTranslation, _startWithWindows));
+        _lyricsMode, _showTranslation, _startWithWindows, _block, _alignment,
+        _taskbarCentered));
 
     private void OnDisplayModeChanged(object? sender, WidgetDisplayMode mode)
     {
@@ -222,7 +243,9 @@ internal sealed class TaskbarMusicWidgetService
             var position = overlay.PositionInAvailableArea(
                 _positionedTaskbar,
                 _positionedTaskbarBounds,
-                _positionedAvailableBounds);
+                _positionedAvailableBounds,
+                _positionedLeftBlockBounds,
+                _positionedCentered);
             if (position == TaskbarPositionResult.Positioned)
                 return;
             ReportPositionFailure(position, _positionedTaskbar);
@@ -436,6 +459,43 @@ internal sealed class TaskbarMusicWidgetService
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception) { /* A failed lyric lookup leaves the metadata visible. */ }
+    }
+
+    /// <summary>
+    /// Keeps the remembered taskbar alignment in step with detection. The overlay
+    /// raises the change itself once it is listening, but the very first
+    /// placement happens before it can.
+    /// </summary>
+    private void RememberTaskbarCentered(bool centered)
+    {
+        if (_taskbarCentered == centered)
+            return;
+
+        _taskbarCentered = centered;
+        SaveSettings();
+    }
+
+    private void OnTaskbarCenteredChanged(object? sender, bool centered)
+    {
+        // A change of the Windows taskbar alignment decides whether the widget
+        // may sit in a left block at all, so it is remembered with the rest.
+        if (_taskbarCentered == centered)
+            return;
+
+        _taskbarCentered = centered;
+        SaveSettings();
+    }
+
+    private void OnBlockChanged(object? sender, WidgetBlock block)
+    {
+        _block = block;
+        SaveSettings();
+    }
+
+    private void OnAlignmentChanged(object? sender, WidgetAlignment alignment)
+    {
+        _alignment = alignment;
+        SaveSettings();
     }
 
     private void OnStartupChanged(object? sender, bool enabled)
@@ -693,17 +753,21 @@ internal sealed class TaskbarMusicWidgetService
                     var samePlacement = !forceReposition &&
                         _positionedTaskbar == taskbar &&
                         RectsNearEqual(layout.TaskbarBounds, _positionedTaskbarBounds) &&
-                        RectsNearEqual(layout.AvailableBounds, _positionedAvailableBounds);
+                        RectsNearEqual(layout.AvailableBounds, _positionedAvailableBounds) &&
+                        RectsNearEqual(layout.LeftBlockBounds, _positionedLeftBlockBounds);
 
                     if (!samePlacement)
                     {
                         TaskbarLayoutDiagnostics.Write(
                             $"reposition overlay: taskbar={taskbar} " +
-                            $"available={layout.AvailableBounds}");
+                            $"available={layout.AvailableBounds} " +
+                            $"leftBlock={layout.LeftBlockBounds}");
                         var position = _overlay.PositionInAvailableArea(
                             taskbar,
                             layout.TaskbarBounds,
-                            layout.AvailableBounds);
+                            layout.AvailableBounds,
+                            layout.LeftBlockBounds,
+                            layout.Centered);
                         if (position != TaskbarPositionResult.Positioned)
                         {
                             TaskbarLayoutDiagnostics.Write(
@@ -716,6 +780,9 @@ internal sealed class TaskbarMusicWidgetService
                         _positionedTaskbar = taskbar;
                         _positionedTaskbarBounds = layout.TaskbarBounds;
                         _positionedAvailableBounds = layout.AvailableBounds;
+                        _positionedLeftBlockBounds = layout.LeftBlockBounds;
+                        _positionedCentered = layout.Centered;
+                        RememberTaskbarCentered(layout.Centered);
 
                         if (!_overlay.IsVisible)
                         {

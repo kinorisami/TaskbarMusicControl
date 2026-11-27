@@ -1,3 +1,4 @@
+using System.Text;
 using System.Windows;
 using System.Windows.Automation;
 
@@ -8,7 +9,24 @@ internal sealed class TaskbarLayoutDetector
     private const int MaxDepth = 10;
     private const int MaxNodes = 500;
 
-    internal sealed record TaskbarLayout(Rect TaskbarBounds, Rect AvailableBounds);
+    /// <summary>
+    /// How much room left of the icon group counts as "centred icons". Left
+    /// aligned icons start a few pixels from the taskbar's left edge.
+    /// </summary>
+    private const double CenteredGapThreshold = 24;
+
+    /// <summary>
+    /// <paramref name="AvailableBounds"/> is the free space right of the task
+    /// list; <paramref name="LeftBlockBounds"/> is the one left of it, which only
+    /// exists when the taskbar icons are centred. Both are empty when there is no
+    /// room. <paramref name="Centered"/> is true when the icon group does not
+    /// start at the taskbar's left edge, i.e. when there are two blocks.
+    /// </summary>
+    internal sealed record TaskbarLayout(
+        Rect TaskbarBounds,
+        Rect AvailableBounds,
+        Rect LeftBlockBounds,
+        bool Centered);
 
     public TaskbarLayout? Detect(IntPtr taskbarHandle)
     {
@@ -62,22 +80,46 @@ internal sealed class TaskbarLayoutDetector
             return null;
         }
 
-        var appsRight = state.AppButtonsBounds.Right;
+        // The icon group is every direct child of the taskbar frame: the Start
+        // button (class ToggleButton), search and task view included. The task
+        // list buttons alone start after them, so measuring from those would let
+        // the widget cover the Start button.
+        var group = state.ContentBounds.Width > 0
+            ? state.ContentBounds
+            : state.AppButtonsBounds;
+
         var trayLeft = state.SystemTrayBounds.Left;
-        if (trayLeft <= appsRight)
+        if (trayLeft <= group.Right)
         {
             TaskbarLayoutDiagnostics.Write(
-                $"available area is invalid: appsRight={appsRight:F0} trayLeft={trayLeft:F0}");
+                $"available area is invalid: groupRight={group.Right:F0} trayLeft={trayLeft:F0}");
             return null;
         }
 
         var available = new Rect(
-            appsRight,
+            group.Right,
             state.TaskbarBounds.Top,
-            trayLeft - appsRight,
+            trayLeft - group.Right,
             state.TaskbarBounds.Height);
 
-        return new TaskbarLayout(state.TaskbarBounds, available);
+        // Icons pinned to the left leave no gap; with centred icons the group
+        // starts well inside the taskbar and there is a second block before it.
+        var leftGap = group.Left - state.TaskbarBounds.Left;
+        var centered = leftGap >= CenteredGapThreshold;
+        var leftBlock = leftGap > 0
+            ? new Rect(
+                state.TaskbarBounds.Left,
+                state.TaskbarBounds.Top,
+                leftGap,
+                state.TaskbarBounds.Height)
+            : Rect.Empty;
+        TaskbarLayoutDiagnostics.Write(
+            $"blocks: left={leftBlock} right={available} " +
+            $"group={group} centered={centered}");
+        if (state.Dump is { Length: > 0 })
+            TaskbarLayoutDiagnostics.Write("uia dump:\n" + state.Dump);
+
+        return new TaskbarLayout(state.TaskbarBounds, available, leftBlock, centered);
     }
 
     private static void ScanTree(
@@ -107,14 +149,33 @@ internal sealed class TaskbarLayoutDetector
                      className == "TrayNotifyWnd")
                 state.SystemTrayBounds = Union(state.SystemTrayBounds, bounds);
 
+            state.Dump?.AppendLine(
+                $"{new string(' ', depth * 2)}{className} {bounds}");
+
             if (depth == MaxDepth || state.NodeCount >= MaxNodes)
                 return;
+
+            // The frame's direct children are the icon group - the Start, search
+            // and task view buttons as well as the task list buttons - while the
+            // system tray sits outside it.
+            var isFrame = className.StartsWith(
+                "Taskbar.TaskbarFrame",
+                StringComparison.Ordinal);
 
             var walker = TreeWalker.ControlViewWalker;
             var child = walker.GetFirstChild(element, cache);
             while (child is not null && state.NodeCount < MaxNodes)
             {
                 var next = walker.GetNextSibling(child, cache);
+                if (isFrame)
+                {
+                    state.ContentBounds = Union(
+                        state.ContentBounds,
+                        GetCached<Rect>(
+                            child,
+                            AutomationElement.BoundingRectangleProperty));
+                }
+
                 ScanTree(child, state, depth + 1, cache);
                 child = next;
             }
@@ -151,7 +212,20 @@ internal sealed class TaskbarLayoutDetector
     {
         public Rect TaskbarBounds { get; } = taskbarBounds;
         public Rect AppButtonsBounds { get; set; }
+
+        /// <summary>Union of the taskbar frame's direct children, Start included.</summary>
+        public Rect ContentBounds { get; set; }
         public Rect SystemTrayBounds { get; set; }
         public int NodeCount { get; set; }
+
+        /// <summary>
+        /// Set when TBMC_DUMP_UIA=1 is in the environment: every node with its
+        /// class name and bounds is written to the layout log, which is how the
+        /// classes of the Start, search and task view buttons are found out.
+        /// </summary>
+        public StringBuilder? Dump { get; } =
+            Environment.GetEnvironmentVariable("TBMC_DUMP_UIA") == "1"
+                ? new StringBuilder()
+                : null;
     }
 }
