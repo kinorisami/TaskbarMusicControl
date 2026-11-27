@@ -31,7 +31,7 @@ internal sealed class TaskbarMusicWidgetService
     /// instead of waiting up to a full 15 second poll to notice the new width.
     /// </summary>
     private static readonly TimeSpan ProbePollInterval = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan ProbeDuration = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ProbeDuration = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// How many quiet scans end the probe. One scan costs about 45 ms of a pool
