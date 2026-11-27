@@ -22,10 +22,31 @@ internal sealed class TaskbarMusicWidgetService
     {
         Interval = TimeSpan.FromSeconds(1)
     };
+    private static readonly TimeSpan NormalPollInterval = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// After the task list changes the shell re-centres the icon group, and that
+    /// movement fires no event at all: the buttons are XAML elements without a
+    /// window. The widget therefore polls quickly for a while after every change
+    /// instead of waiting up to a full 15 second poll to notice the new width.
+    /// </summary>
+    private static readonly TimeSpan ProbePollInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan ProbeDuration = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How many quiet scans end the probe. One scan costs about 45 ms of a pool
+    /// thread and a UI Automation call into Explorer, so the probe stops once the
+    /// layout has been seen unchanged a few times instead of running its full
+    /// length every time.
+    /// </summary>
+    private const int ProbeStableScansToStop = 3;
+    private int _probeStableScans;
+
     private readonly DispatcherTimer _layoutTimer = new()
     {
-        Interval = TimeSpan.FromSeconds(15)
+        Interval = NormalPollInterval
     };
+    private DateTime _probeUntil = DateTime.MinValue;
     private readonly DispatcherTimer _layoutChangeTimer = new()
     {
         Interval = TimeSpan.FromMilliseconds(150)
@@ -80,6 +101,7 @@ internal sealed class TaskbarMusicWidgetService
     private Rect _positionedTaskbarBounds;
     private Rect _positionedAvailableBounds;
     private Rect _positionedLeftBlockBounds;
+    private Rect _positionedBlockBounds;
     private bool _positionedCentered;
     private bool _forceReposition;
     private bool _taskbarTemporarilyMissing;
@@ -246,6 +268,7 @@ internal sealed class TaskbarMusicWidgetService
         _positionedAvailableBounds = layout.AvailableBounds;
         _positionedLeftBlockBounds = layout.LeftBlockBounds;
         _positionedCentered = layout.Centered;
+        _positionedBlockBounds = ChosenBlock(layout);
         RememberTaskbarCentered(layout.Centered);
 
         Application.Current.MainWindow = overlay;
@@ -812,7 +835,28 @@ internal sealed class TaskbarMusicWidgetService
     }
 
     private void OnLayoutTimerTick(object? sender, EventArgs e)
-        => _ = RefreshTaskbarLayoutAsync();
+    {
+        if (_layoutTimer.Interval == ProbePollInterval && DateTime.UtcNow >= _probeUntil)
+            EndLayoutProbe();
+
+        _ = RefreshTaskbarLayoutAsync();
+    }
+
+    /// <summary>Switches the poll to the fast interval while the shell settles.</summary>
+    private void StartLayoutProbe()
+    {
+        _probeStableScans = 0;
+        _probeUntil = DateTime.UtcNow + ProbeDuration;
+        if (_layoutTimer.Interval != ProbePollInterval)
+            _layoutTimer.Interval = ProbePollInterval;
+    }
+
+    private void EndLayoutProbe()
+    {
+        _probeStableScans = 0;
+        _probeUntil = DateTime.MinValue;
+        _layoutTimer.Interval = NormalPollInterval;
+    }
 
     private void OnTaskbarLayoutChanged(object? sender, EventArgs e)
         => ScheduleLayoutRefresh();
@@ -842,6 +886,7 @@ internal sealed class TaskbarMusicWidgetService
         // Debounced: the WinEvent and UIA listeners fire in bursts, so this is
         // the one place a layout refresh gets recorded.
         TaskbarLayoutDiagnostics.Write("layout change settled: refreshing");
+        StartLayoutProbe();
         _ = RefreshTaskbarLayoutAsync();
         ScheduleSettleRefreshes();
     }
@@ -875,19 +920,33 @@ internal sealed class TaskbarMusicWidgetService
     /// the layout has settled and further scans would only cost CPU. Each scan is
     /// a UI Automation walk of the taskbar, so they are not free.
     /// </summary>
-    private void NoteDetectedLayout(Rect availableBounds)
+    private void NoteDetectedLayout(Rect blockBounds)
     {
+        // Movement of the icon group produces no event, so a detection that
+        // differs from the applied placement buys another probe window. The
+        // block that matters is the one the widget is pinned to: with a left
+        // aligned widget the right block can stay put while the left one grows.
+        if (blockBounds != _positionedBlockBounds)
+        {
+            StartLayoutProbe();
+        }
+        else if (_layoutTimer.Interval == ProbePollInterval &&
+                 ++_probeStableScans >= ProbeStableScansToStop)
+        {
+            EndLayoutProbe();
+        }
+
         if (_settleRefreshesLeft <= 0)
             return;
 
-        if (availableBounds == _settleLastAvailable)
+        if (blockBounds == _settleLastAvailable)
         {
             _settleRefreshesLeft = 0;
             _settleRefreshTimer.Stop();
             return;
         }
 
-        _settleLastAvailable = availableBounds;
+        _settleLastAvailable = blockBounds;
     }
 
     private void OnNativeHandleTimerTick(object? sender, EventArgs e)
@@ -950,17 +1009,23 @@ internal sealed class TaskbarMusicWidgetService
             {
                 _layoutRefreshRequested = false;
                 DiscardMissingSelection();
+                var detectStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 var layouts = await Task.Run(DetectTaskbarLayouts);
+                var detectMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(
+                    detectStarted).TotalMilliseconds;
                 _taskbarOptions = layouts.Select(entry => new TaskbarOption(
                     entry.Taskbar.DeviceId,
                     entry.Taskbar.DisplayName,
                     entry.Taskbar.IsPrimary)).ToArray();
                 _overlay?.SetTaskbarOptions(_taskbarOptions, _selectedTaskbarDeviceId);
                 TaskbarLayoutDiagnostics.Write(
-                    $"layout detected: available=" +
+                    $"layout detected ({detectMilliseconds:F1} ms): available=" +
                     string.Join(";", layouts.Select(entry => entry.Layout.AvailableBounds)));
                 if (layouts.Length > 0)
-                    NoteDetectedLayout(OrderForSelection(layouts)[0].Layout.AvailableBounds);
+                {
+                    var first = OrderForSelection(layouts)[0].Layout;
+                    NoteDetectedLayout(ChosenBlock(first));
+                }
                 var foundLayout = false;
 
                 foreach (var entry in OrderForSelection(layouts))
@@ -1035,6 +1100,7 @@ internal sealed class TaskbarMusicWidgetService
                         _positionedAvailableBounds = layout.AvailableBounds;
                         _positionedLeftBlockBounds = layout.LeftBlockBounds;
                         _positionedCentered = layout.Centered;
+                        _positionedBlockBounds = ChosenBlock(layout);
                         RememberTaskbarCentered(layout.Centered);
 
                         if (!_overlay.IsVisible)
@@ -1228,6 +1294,12 @@ internal sealed class TaskbarMusicWidgetService
         _overlay?.SetTaskbarSelection(_selectedTaskbarDeviceId);
         SaveSettings();
     }
+
+    /// <summary>The block the widget is pinned to, which is what it follows.</summary>
+    private Rect ChosenBlock(TaskbarLayoutDetector.TaskbarLayout layout) =>
+        _block == WidgetBlock.Left && !layout.LeftBlockBounds.IsEmpty
+            ? layout.LeftBlockBounds
+            : layout.AvailableBounds;
 
     private TaskbarLayoutEntry[] DetectTaskbarLayouts()
     {
