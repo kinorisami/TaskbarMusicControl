@@ -32,6 +32,22 @@ internal sealed class MediaSessionService
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private readonly PlaybackClock _playbackClock = new();
     private GlobalSystemMediaTransportControlsSessionManager? _manager;
+
+    /// <summary>True while any player exposes a media session at all.</summary>
+    public bool HasSession => _session is not null;
+
+    /// <summary>Which player the widget is showing; empty means "the current one".</summary>
+    private string _selectedPlayerId = "";
+    private IReadOnlyList<MediaPlayerOption> _players = Array.Empty<MediaPlayerOption>();
+
+    /// <summary>The players that expose a session right now.</summary>
+    public IReadOnlyList<MediaPlayerOption> Players => _players;
+
+    /// <summary>The player behind the session on screen, whoever picked it.</summary>
+    public string? ActivePlayerId => _session?.SourceAppUserModelId;
+
+    /// <summary>Raised when the set of players changes, on a pool thread.</summary>
+    public event Action? PlayersChanged;
     private GlobalSystemMediaTransportControlsSession? _session;
     private string _clockTrackIdentity = "";
     private readonly object _artworkGate = new();
@@ -49,6 +65,16 @@ internal sealed class MediaSessionService
     public event Action<MediaSessionState>? StateChanged;
     public MediaSessionState CurrentState { get; private set; } = MediaSessionState.Empty;
     public TimeSpan CurrentPosition => _playbackClock.GetCurrentPosition();
+
+    /// <summary>
+    /// Pins the widget to one player instead of following whatever Windows
+    /// considers current. An empty id goes back to following the current session.
+    /// </summary>
+    public void SelectPlayer(string? playerId)
+    {
+        _selectedPlayerId = playerId ?? "";
+        _ = Task.Run(() => RefreshCurrentSessionAsync());
+    }
 
     public async Task InitializeAsync()
     {
@@ -228,6 +254,93 @@ internal sealed class MediaSessionService
         }
     }
 
+    /// <summary>
+    /// The session to show: the pinned player when it is running, otherwise the
+    /// one Windows calls current. The player list is kept up to date here because
+    /// this is the only place that talks to the manager.
+    /// </summary>
+    private GlobalSystemMediaTransportControlsSession? ResolveSession()
+    {
+        var manager = _manager;
+        if (manager is null)
+            return null;
+
+        IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions;
+        try
+        {
+            sessions = manager.GetSessions();
+        }
+        catch (Exception)
+        {
+            return manager.GetCurrentSession();
+        }
+
+        UpdatePlayers(sessions);
+
+        if (_selectedPlayerId.Length > 0)
+        {
+            foreach (var candidate in sessions)
+            {
+                if (string.Equals(
+                        candidate.SourceAppUserModelId,
+                        _selectedPlayerId,
+                        StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+            }
+        }
+
+        try
+        {
+            return manager.GetCurrentSession();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private void UpdatePlayers(
+        IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions)
+    {
+        var options = new List<MediaPlayerOption>(sessions.Count);
+        foreach (var session in sessions)
+        {
+            var id = session.SourceAppUserModelId;
+            if (string.IsNullOrWhiteSpace(id))
+                continue;
+            options.Add(new MediaPlayerOption(id, DescribePlayer(id)));
+        }
+
+        options.Sort((left, right) => string.Compare(
+            left.DisplayName, right.DisplayName, StringComparison.OrdinalIgnoreCase));
+
+        var changed = options.Count != _players.Count;
+        for (var i = 0; !changed && i < options.Count; i++)
+            changed = !string.Equals(options[i].Id, _players[i].Id, StringComparison.Ordinal);
+
+        if (!changed)
+            return;
+
+        _players = options;
+        PlayersChanged?.Invoke();
+    }
+
+    /// <summary>A readable name for the AUMID: "cloudmusic.exe" or the package name.</summary>
+    private static string DescribePlayer(string appUserId)
+    {
+        if (appUserId.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            return Path.GetFileNameWithoutExtension(appUserId);
+
+        var name = appUserId;
+        var bang = name.IndexOf('!');
+        if (bang > 0)
+            name = name[..bang];
+        var underscore = name.IndexOf('_');
+        if (underscore > 0)
+            name = name[..underscore];
+        return name;
+    }
+
     private void OnCurrentSessionChanged(
         GlobalSystemMediaTransportControlsSessionManager sender,
         CurrentSessionChangedEventArgs args) =>
@@ -259,7 +372,7 @@ internal sealed class MediaSessionService
         await _refreshLock.WaitAsync();
         try
         {
-            var nextSession = _manager?.GetCurrentSession();
+            var nextSession = ResolveSession();
             if (!ReferenceEquals(_session, nextSession))
             {
                 if (_session is not null)
@@ -901,6 +1014,8 @@ internal sealed class MediaSessionService
         $"{artist}\u001f{title}\u001f{album}";
 
 }
+
+internal sealed record MediaPlayerOption(string Id, string DisplayName);
 
 internal sealed record MediaSessionState(
     string Title,

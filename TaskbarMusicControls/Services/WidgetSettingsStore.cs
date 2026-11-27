@@ -13,6 +13,8 @@ internal sealed record WidgetSettings(
     bool LyricsMode,
     bool ShowTranslation,
     bool StartWithWindows,
+    bool HideWhenIdle,
+    string PlayerId,
     WidgetBlock Block,
     WidgetAlignment Alignment,
     bool TaskbarCentered)
@@ -20,7 +22,7 @@ internal sealed record WidgetSettings(
     public static WidgetSettings Default { get; } = new(
         WidgetDisplayMode.Full, "", LyricsSourceSettings.Default,
         LyricsMode: false, ShowTranslation: true, StartWithWindows: false,
-        Block: WidgetBlock.Right, Alignment: WidgetAlignment.Right,
+        HideWhenIdle: false, PlayerId: "", Block: WidgetBlock.Right, Alignment: WidgetAlignment.Right,
         TaskbarCentered: false);
 }
 
@@ -75,6 +77,8 @@ internal static class WidgetSettingsStore
                 entry.LyricsMode is null ||
                 entry.ShowTranslation is null ||
                 entry.StartWithWindows is null ||
+                entry.HideWhenIdle is null ||
+                entry.PlayerId is null ||
                 entry.Block is null ||
                 entry.Alignment is null ||
                 entry.TaskbarCentered is null;
@@ -88,6 +92,8 @@ internal static class WidgetSettingsStore
                 entry.LyricsMode ?? false,
                 entry.ShowTranslation ?? true,
                 entry.StartWithWindows ?? false,
+                entry.HideWhenIdle ?? false,
+                entry.PlayerId ?? "",
                 entry.Block is { } block && Enum.IsDefined(block)
                     ? block
                     : WidgetBlock.Right,
@@ -132,6 +138,8 @@ internal static class WidgetSettingsStore
                         LyricsMode = settings.LyricsMode,
                         ShowTranslation = settings.ShowTranslation,
                         StartWithWindows = settings.StartWithWindows,
+                        HideWhenIdle = settings.HideWhenIdle,
+                        PlayerId = settings.PlayerId,
                         Block = settings.Block,
                         Alignment = settings.Alignment,
                         TaskbarCentered = settings.TaskbarCentered
@@ -166,6 +174,8 @@ internal static class WidgetSettingsStore
         public bool? LyricsMode { get; set; }
         public bool? ShowTranslation { get; set; }
         public bool? StartWithWindows { get; set; }
+        public bool? HideWhenIdle { get; set; }
+        public string? PlayerId { get; set; }
         public WidgetBlock? Block { get; set; }
         public WidgetAlignment? Alignment { get; set; }
         public bool? TaskbarCentered { get; set; }

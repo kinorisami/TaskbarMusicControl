@@ -134,6 +134,14 @@ public partial class MusicOverlayWindow : Window
     private LyricsSource? _lyricsSource;
     private bool _lyricsLocked;
     private bool _startWithWindows;
+    private bool _hideWhenIdle;
+    private IReadOnlyList<MediaPlayerOption> _players = Array.Empty<MediaPlayerOption>();
+    private string? _activePlayerId;
+    private string _pinnedPlayerId = "";
+    private bool _idle;
+    private bool _idleHidden;
+    private bool _lightTheme = true;
+    private bool _themeRefreshQueued;
     private WidgetBlock _block = WidgetBlock.Right;
     private WidgetAlignment _alignment = WidgetAlignment.Right;
     private bool _taskbarCentered;
@@ -162,6 +170,23 @@ public partial class MusicOverlayWindow : Window
     internal event Action<object?, bool>? LyricsLockChanged;
     internal event Action<object?, bool>? TranslationChanged;
     internal event Action<object?, bool>? StartupChanged;
+    internal event Action<object?, bool>? HideWhenIdleChanged;
+    internal event Action<object?, string?>? PlayerSelectedChanged;
+
+    /// <summary>
+    /// The players that currently expose a media session, and the one being
+    /// shown. With a single player there is nothing to choose, so the menu omits
+    /// the list entirely.
+    /// </summary>
+    internal void SetPlayerOptions(
+        IReadOnlyList<MediaPlayerOption> players,
+        string? activePlayerId,
+        string pinnedPlayerId)
+    {
+        _players = players;
+        _activePlayerId = activePlayerId;
+        _pinnedPlayerId = pinnedPlayerId;
+    }
     internal event Action<object?, TimeSpan>? LyricsOffsetChanged;
     internal event Action<object?, string>? TaskbarSelectionChanged;
     internal event Action<object?, TimeSpan>? SeekRequested;
@@ -183,6 +208,7 @@ public partial class MusicOverlayWindow : Window
         InitializeComponent();
         SourceInitialized += OnSourceInitialized;
         IsVisibleChanged += OnIsVisibleChanged;
+        Closed += OnWindowClosed;
         _drawerHideTimer.Tick += OnDrawerHideTimerTick;
         _progressTimer.Tick += (_, _) => RenderProgress();
         _copyFeedbackTimer.Tick += (_, _) =>
@@ -190,6 +216,69 @@ public partial class MusicOverlayWindow : Window
             _copyFeedbackTimer.Stop();
             CopyButton.Content = CopyGlyph;
         };
+        ApplyTaskbarTheme();
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+    }
+
+    private void OnWindowClosed(object? sender, EventArgs e) =>
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+
+    private void OnUserPreferenceChanged(
+        object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+    {
+        if (_themeRefreshQueued)
+            return;
+
+        _themeRefreshQueued = true;
+        Dispatcher.BeginInvoke(() =>
+        {
+            _themeRefreshQueued = false;
+            ApplyTaskbarTheme();
+        });
+    }
+
+    /// <summary>
+    /// The widget draws no background of its own, so its text sits directly on
+    /// the taskbar and has to follow the taskbar's light or dark appearance.
+    /// Windows keeps that setting in SystemUsesLightTheme; a preference change -
+    /// switching the system theme - re-applies it.
+    /// </summary>
+    internal void ApplyTaskbarTheme()
+    {
+        var light = true;
+        try
+        {
+            var value = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                "SystemUsesLightTheme",
+                1);
+            light = value is not int flag || flag != 0;
+        }
+        catch (Exception)
+        {
+            // A missing key means the default appearance; light is the default.
+        }
+
+        _lightTheme = light;
+        TaskbarLayoutDiagnostics.Write($"theme: {(light ? "light" : "dark")} taskbar");
+        SetThemeBrush("TextPrimary", light ? 0xFF202124u : 0xFFEDEFF2u);
+        SetThemeBrush("TextSecondary", light ? 0xFF50545Au : 0xFFA8AEB8u);
+        SetThemeBrush("IconForeground", light ? 0xFF30343Au : 0xFFE3E6EAu);
+        SetThemeBrush("Accent", light ? 0xFF167C69u : 0xFF4CC2A8u);
+        SetThemeBrush("HoverOverlay", light ? 0x18000000u : 0x22FFFFFFu);
+        SetThemeBrush("PressedOverlay", light ? 0x28000000u : 0x33FFFFFFu);
+        SetThemeBrush("PlayOverlay", light ? 0x22000000u : 0x33FFFFFFu);
+        SetThemeBrush("PlayOverlayHover", light ? 0x44000000u : 0x4DFFFFFFu);
+        SetThemeBrush("PlayOverlayPressed", light ? 0x66000000u : 0x66FFFFFFu);
+        SetLyricsMode(_lyricsMode);
+    }
+
+    private void SetThemeBrush(string key, uint argb)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(
+            (byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb));
+        brush.Freeze();
+        Resources[key] = brush;
     }
 
     private static SolidColorBrush CreateFrozenBrush(byte a, byte r, byte g, byte b)
@@ -364,9 +453,10 @@ public partial class MusicOverlayWindow : Window
     internal void SetLyricsMode(bool enabled)
     {
         _lyricsMode = enabled;
-        LyricsButton.Foreground = enabled
-            ? new SolidColorBrush(Color.FromRgb(22, 124, 105))
-            : new SolidColorBrush(Color.FromRgb(48, 52, 58));
+        // The brush comes from the theme resources, so it stays readable when the
+        // taskbar switches appearance.
+        LyricsButton.Foreground = (Brush)Resources[
+            enabled ? "Accent" : "IconForeground"];
     }
 
     internal void SetDisplayMode(WidgetDisplayMode mode)
@@ -791,6 +881,37 @@ public partial class MusicOverlayWindow : Window
 
     internal void SetStartWithWindows(bool enabled) => _startWithWindows = enabled;
 
+    internal void SetHideWhenIdle(bool enabled)
+    {
+        _hideWhenIdle = enabled;
+        ApplyIdleVisibility();
+    }
+
+    /// <summary>
+    /// Tells the widget whether any player has a session at all. With the option
+    /// on, a widget without media is made fully transparent rather than closed:
+    /// the window is a child of the taskbar and stays attached, so it only has to
+    /// be revealed again when playback starts.
+    /// </summary>
+    internal void SetIdle(bool idle)
+    {
+        _idle = idle;
+        ApplyIdleVisibility();
+    }
+
+    private void ApplyIdleVisibility()
+    {
+        var hidden = _hideWhenIdle && _idle;
+        if (_idleHidden == hidden)
+            return;
+
+        _idleHidden = hidden;
+        Opacity = hidden ? 0 : 1;
+        IsHitTestVisible = !hidden;
+        if (hidden)
+            SetDrawerOpen(false);
+    }
+
     private void UpdateTranslationButton() =>
         TranslationButton.Foreground = _showTranslation ? AccentBrush : InactiveBrush;
 
@@ -942,6 +1063,9 @@ public partial class MusicOverlayWindow : Window
     private const int CmdOffsetReset = 310;
     private const int CmdTaskbarBase = 400;
     private const int CmdStartWithWindows = 500;
+    private const int CmdHideWhenIdle = 502;
+    private const int CmdPlayerFollow = 700;
+    private const int CmdPlayerBase = 701;
     private const int CmdExit = 501;
     private const int CmdAlignLeft = 600;
     private const int CmdAlignRight = 601;
@@ -953,6 +1077,18 @@ public partial class MusicOverlayWindow : Window
     private bool _menuOpen;
 
     private bool IsContextMenuOpen => _menuOpen;
+
+    /// <summary>
+    /// Opens the widget's own context menu from outside the widget - the tray
+    /// icon - using the tray's message window as the menu owner. The owner has to
+    /// belong to this thread, which it does.
+    /// </summary>
+    internal void ShowContextMenuAt(nint owner, int screenX, int screenY)
+    {
+        var command = ShowContextMenu(screenX, screenY, owner);
+        if (command != 0)
+            DispatchMenuCommand(command);
+    }
 
     private void OnRootRightButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
@@ -986,7 +1122,7 @@ public partial class MusicOverlayWindow : Window
     /// every time instead of being kept in sync, which is what makes the native
     /// menu cheaper than the WPF one.
     /// </summary>
-    private int ShowContextMenu(int screenX, int screenY)
+    private int ShowContextMenu(int screenX, int screenY, nint? ownerOverride = null)
     {
         using var menu = new NativeMenu();
 
@@ -1042,18 +1178,34 @@ public partial class MusicOverlayWindow : Window
             block.AddItem("Right of the task buttons", CmdBlockRight, _block == WidgetBlock.Right);
         }
 
+        if (_players.Count > 1)
+        {
+            var player = menu.AddSubmenu("Player");
+            player.AddItem("Follow the current player", CmdPlayerFollow,
+                _pinnedPlayerId.Length == 0);
+            for (var i = 0; i < _players.Count; i++)
+            {
+                var option = _players[i];
+                player.AddItem(
+                    option.DisplayName,
+                    CmdPlayerBase + i,
+                    string.Equals(option.Id, _pinnedPlayerId, StringComparison.Ordinal));
+            }
+        }
+
         var alignment = menu.AddSubmenu("Alignment");
         alignment.AddItem("Left", CmdAlignLeft, _alignment == WidgetAlignment.Left);
         alignment.AddItem("Right", CmdAlignRight, _alignment == WidgetAlignment.Right);
 
         menu.AddSeparator();
         menu.AddItem("Start with Windows", CmdStartWithWindows, _startWithWindows);
+        menu.AddItem("Hide when nothing is playing", CmdHideWhenIdle, _hideWhenIdle);
         menu.AddItem("Exit Taskbar Music Widget", CmdExit);
 
         // The menu must be owned by a window of this thread: TrackPopupMenuEx
         // posts its messages to the owner, and an owner in another process never
         // receives them, which cancels the menu immediately.
-        var owner = _nativeHandle != 0 ? _nativeHandle : _taskbarHandle;
+        var owner = ownerOverride ?? (_nativeHandle != 0 ? _nativeHandle : _taskbarHandle);
         _menuOpen = true;
         try
         {
@@ -1153,6 +1305,19 @@ public partial class MusicOverlayWindow : Window
             case CmdStartWithWindows:
                 _startWithWindows = !_startWithWindows;
                 StartupChanged?.Invoke(this, _startWithWindows);
+                break;
+            case CmdPlayerFollow:
+                PlayerSelectedChanged?.Invoke(this, null);
+                break;
+            case >= CmdPlayerBase and < CmdPlayerBase + 100:
+                var index = command - CmdPlayerBase;
+                if (index < _players.Count)
+                    PlayerSelectedChanged?.Invoke(this, _players[index].Id);
+                break;
+            case CmdHideWhenIdle:
+                _hideWhenIdle = !_hideWhenIdle;
+                ApplyIdleVisibility();
+                HideWhenIdleChanged?.Invoke(this, _hideWhenIdle);
                 break;
             case CmdExit:
                 ExitWidget();

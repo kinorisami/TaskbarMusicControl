@@ -13,10 +13,21 @@
         UseLayoutRounding="True">
 
     <Window.Resources>
+        <!-- Taskbar colours. ApplyTheme() replaces these values when the taskbar
+             switches between its light and dark appearance. -->
+        <SolidColorBrush x:Key="TextPrimary" Color="#202124"/>
+        <SolidColorBrush x:Key="TextSecondary" Color="#50545A"/>
+        <SolidColorBrush x:Key="IconForeground" Color="#30343A"/>
+        <SolidColorBrush x:Key="Accent" Color="#167C69"/>
+        <SolidColorBrush x:Key="HoverOverlay" Color="#18000000"/>
+        <SolidColorBrush x:Key="PressedOverlay" Color="#28000000"/>
+        <SolidColorBrush x:Key="PlayOverlay" Color="#22000000"/>
+        <SolidColorBrush x:Key="PlayOverlayHover" Color="#44000000"/>
+        <SolidColorBrush x:Key="PlayOverlayPressed" Color="#66000000"/>
         <Style x:Key="TransportButton" TargetType="Button">
             <Setter Property="Width" Value="24"/>
             <Setter Property="Height" Value="32"/>
-            <Setter Property="Foreground" Value="#30343A"/>
+            <Setter Property="Foreground" Value="{DynamicResource IconForeground}"/>
             <Setter Property="Background" Value="#01000000"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -40,13 +51,13 @@
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="ButtonBorder"
                                         Property="Background"
-                                        Value="#18000000"/>
+                                        Value="{DynamicResource HoverOverlay}"/>
                             </Trigger>
 
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="ButtonBorder"
                                         Property="Background"
-                                        Value="#28000000"/>
+                                        Value="{DynamicResource PressedOverlay}"/>
                             </Trigger>
 
                             <Trigger Property="IsEnabled" Value="False">
@@ -61,12 +72,12 @@
         <Style x:Key="PlayButton"
                TargetType="Button"
                BasedOn="{StaticResource TransportButton}">
-            <Setter Property="Foreground" Value="#167C69"/>
+            <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
             <Setter Property="FontSize" Value="18"/>
         </Style>
 
         <Style x:Key="HoverPlaybackButtonStyle" TargetType="Button">
-            <Setter Property="Background" Value="#22000000"/>
+            <Setter Property="Background" Value="{DynamicResource PlayOverlay}"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -82,10 +93,10 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonSurface" Property="Background" Value="#44000000"/>
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource PlayOverlayHover}"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonSurface" Property="Background" Value="#66000000"/>
+                                <Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource PlayOverlayPressed}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -180,12 +191,12 @@
                                 </StackPanel.RenderTransform>
                                 <TextBlock x:Name="TitlePrimary"
                                            Text="No media playing"
-                                           Foreground="#202124"
+                                           Foreground="{DynamicResource TextPrimary}"
                                            FontWeight="SemiBold"
                                            FontSize="13"/>
                                 <Border x:Name="TitleSpacer" Width="32" Visibility="Collapsed"/>
                                 <TextBlock x:Name="TitleSecondary"
-                                           Foreground="#202124"
+                                           Foreground="{DynamicResource TextPrimary}"
                                            FontWeight="SemiBold"
                                            FontSize="13"
                                            Visibility="Collapsed"/>
@@ -198,11 +209,11 @@
                                 </StackPanel.RenderTransform>
                                 <TextBlock x:Name="ArtistPrimary"
                                            Text="Start playback in a media app"
-                                           Foreground="#50545A"
+                                           Foreground="{DynamicResource TextSecondary}"
                                            FontSize="11"/>
                                 <Border x:Name="ArtistSpacer" Width="32" Visibility="Collapsed"/>
                                 <TextBlock x:Name="ArtistSecondary"
-                                           Foreground="#50545A"
+                                           Foreground="{DynamicResource TextSecondary}"
                                            FontSize="11"
                                            Visibility="Collapsed"/>
                             </StackPanel>
@@ -216,12 +227,12 @@
                           Visibility="Collapsed">
                         <Canvas x:Name="LyricsOriginalCanvas" Height="18" ClipToBounds="True"
                                 VerticalAlignment="Center">
-                            <TextBlock x:Name="LyricsOriginalText" Foreground="#202124"
+                            <TextBlock x:Name="LyricsOriginalText" Foreground="{DynamicResource TextPrimary}"
                                        FontWeight="SemiBold" FontSize="13"/>
                         </Canvas>
                         <Canvas x:Name="LyricsTranslationCanvas" Height="16" ClipToBounds="True"
                                 VerticalAlignment="Bottom" Visibility="Collapsed">
-                            <TextBlock x:Name="LyricsTranslationText" Foreground="#50545A"
+                            <TextBlock x:Name="LyricsTranslationText" Foreground="{DynamicResource TextSecondary}"
                                        FontSize="11"/>
                         </Canvas>
                     </Grid>
@@ -246,7 +257,7 @@
                             <TextBlock x:Name="ProgressText"
                                        HorizontalAlignment="Left"
                                        VerticalAlignment="Center"
-                                       Foreground="#50545A"
+                                       Foreground="{DynamicResource TextSecondary}"
                                        FontSize="11"
                                        Visibility="Collapsed"/>
                             <StackPanel x:Name="PlaybackControls"
@@ -324,12 +335,12 @@
                                     Height="3"
                                     VerticalAlignment="Center"
                                     CornerRadius="1.5"
-                                    Background="#22000000">
+                                    Background="{DynamicResource PlayOverlay}">
                                 <Border x:Name="ProgressFill"
                                         HorizontalAlignment="Left"
                                         Width="0"
                                         CornerRadius="1.5"
-                                        Background="#167C69"/>
+                                        Background="{DynamicResource Accent}"/>
                             </Border>
                         </Border>
                     </Grid>

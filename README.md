@@ -14,6 +14,10 @@
   - **NetEase Music**：只使用网易云音乐接口及对应缓存。
   - **LRCLIB**：只使用 LRCLIB 接口及对应缓存。
 - 右键组件可切换显示布局、选择歌词来源、调整歌词偏移、选择要挂载的任务栏/显示器，以及退出程序。
+- 跟随任务栏的深色/浅色外观自动换色。
+- 可设置没有媒体播放时自动隐藏；此时歌词同步与布局轮询定时器一并停止。
+- 同时有多个播放器时，可在右键菜单里指定跟踪哪一个。
+- 通知区域有一个托盘图标，任务栏放不下组件或组件被隐藏时仍可打开菜单。
 - 监视 Windows 任务栏变化，并在 Explorer 重启后尝试重新挂接组件。
 
 ## 显示布局
@@ -113,7 +117,7 @@ LRC 时间戳用于跟随播放进度；同一时间戳的连续两行会作为�
 
 组件设置位于 `%LOCALAPPDATA%\TaskbarMusicControls`：
 
-- `settings.json`：全部设置——`DisplayMode`（显示布局）、`TaskbarDeviceId`（选中的任务栏/显示器）、`LyricsPreferLocal`（本地文件是否优先）与 `LyricsOrder`（`NeteaseFirst` 或 `LrclibFirst`）。位置相关的是 `Block`（图标左侧还是右侧的空档）、`Alignment`（贴该空档的哪一端）和 `TaskbarCentered`（自动探测到的 Windows 任务栏图标对齐方式，决定是否存在左侧空档）。单曲锁定源与歌词偏移保存在该曲的 `.meta.json` 里。
+- `settings.json`：全部设置——`DisplayMode`（显示布局）、`TaskbarDeviceId`（选中的任务栏/显示器）、`LyricsPreferLocal`（本地文件是否优先）与 `LyricsOrder`（`NeteaseFirst` 或 `LrclibFirst`）、`HideWhenIdle`（无播放时是否隐藏）与 `PlayerId`（跟踪的播放器，空表示跟随系统当前会话）。位置相关的是 `Block`（图标左侧还是右侧的空档）、`Alignment`（贴该空档的哪一端）和 `TaskbarCentered`（自动探测到的 Windows 任务栏图标对齐方式，决定是否存在左侧空档）。单曲锁定源与歌词偏移保存在该曲的 `.meta.json` 里。
   这是唯一的设置文件：读写都只走它。文件里没有 `Version` 时会被忽略并使用默认值（暂不提供旧格式迁移）。
 - `Lyrics\Cache\<hash>.meta.json`：单曲状态——歌词偏移、该曲锁定的歌词源、上次使用的源与匹配度。
 - `Lyrics\Cache`：在线歌词缓存。

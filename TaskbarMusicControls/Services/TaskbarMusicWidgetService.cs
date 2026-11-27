@@ -57,7 +57,10 @@ internal sealed class TaskbarMusicWidgetService
     private bool _lyricsMode;
     private bool _showTranslation = true;
     private bool _startWithWindows;
+    private bool _hideWhenIdle;
+    private string _playerId = "";
     private bool _exitRequested;
+    private TrayIcon? _trayIcon;
     private WidgetBlock _block = WidgetBlock.Right;
     private WidgetAlignment _alignment = WidgetAlignment.Right;
     private bool _taskbarCentered;
@@ -104,6 +107,8 @@ internal sealed class TaskbarMusicWidgetService
         _lyricsMode = settings.LyricsMode;
         _showTranslation = settings.ShowTranslation;
         _startWithWindows = settings.StartWithWindows;
+        _hideWhenIdle = settings.HideWhenIdle;
+        _playerId = settings.PlayerId;
         _block = settings.Block;
         _alignment = settings.Alignment;
         _taskbarCentered = settings.TaskbarCentered;
@@ -117,6 +122,11 @@ internal sealed class TaskbarMusicWidgetService
         if (_startWithWindows != AutostartStore.IsRegistered())
             AutostartStore.Set(_startWithWindows);
         _layoutTimer.Start();
+        // Pin the saved player before the first session is resolved, so the
+        // widget starts on it when it is running.
+        _mediaSessionService.SelectPlayer(_playerId);
+        _mediaSessionService.PlayersChanged += OnPlayersChanged;
+        StartTrayIcon();
         await _mediaSessionService.InitializeAsync();
 
         var layouts = await Task.Run(DetectTaskbarLayouts);
@@ -185,6 +195,8 @@ internal sealed class TaskbarMusicWidgetService
         overlay.LyricsOffsetChanged += OnLyricsOffsetChanged;
         overlay.TranslationChanged += OnTranslationChanged;
         overlay.StartupChanged += OnStartupChanged;
+        overlay.HideWhenIdleChanged += OnHideWhenIdleChanged;
+        overlay.PlayerSelectedChanged += OnPlayerSelectedChanged;
         overlay.DisplayModeChanged += OnDisplayModeChanged;
         overlay.TaskbarSelectionChanged += OnTaskbarSelectionChanged;
         overlay.Closed += OnOverlayClosed;
@@ -195,6 +207,9 @@ internal sealed class TaskbarMusicWidgetService
         overlay.SetLyricsMode(_lyricsMode);
         overlay.SetShowTranslation(_showTranslation);
         overlay.SetStartWithWindows(_startWithWindows);
+        overlay.SetHideWhenIdle(_hideWhenIdle);
+        overlay.SetPlayerOptions(
+            _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
         overlay.SetBlock(_block);
         overlay.SetAlignment(_alignment);
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
@@ -226,7 +241,8 @@ internal sealed class TaskbarMusicWidgetService
     /// <summary>Writes every setting, so the file always holds the full state.</summary>
     private void SaveSettings() => WidgetSettingsStore.Save(new WidgetSettings(
         _displayMode, _selectedTaskbarDeviceId, _lyricsSourceSettings,
-        _lyricsMode, _showTranslation, _startWithWindows, _block, _alignment,
+        _lyricsMode, _showTranslation, _startWithWindows, _hideWhenIdle, _playerId,
+        _block, _alignment,
         _taskbarCentered));
 
     private void OnDisplayModeChanged(object? sender, WidgetDisplayMode mode)
@@ -359,6 +375,10 @@ internal sealed class TaskbarMusicWidgetService
 
     private void ApplyMediaState(MusicOverlayWindow overlay, MediaSessionState state)
     {
+        overlay.SetIdle(!_mediaSessionService.HasSession);
+        overlay.SetPlayerOptions(
+            _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
+
         var trackKey = $"{state.Artist}\u001f{state.Title}\u001f{state.Album}";
         if (!string.Equals(trackKey, _lyricsTrackKey, StringComparison.Ordinal))
         {
@@ -502,6 +522,84 @@ internal sealed class TaskbarMusicWidgetService
         SaveSettings();
     }
 
+    /// <summary>
+    /// The tray icon is the widget's fallback entry point: the taskbar may have
+    /// no room for it, and it is hidden while nothing plays.
+    /// </summary>
+    private void StartTrayIcon()
+    {
+        if (_trayIcon is not null)
+            return;
+
+        try
+        {
+            _trayIcon = new TrayIcon();
+            _trayIcon.MenuRequested += OnTrayMenuRequested;
+        }
+        catch (Exception)
+        {
+            // No notification area access is not a reason to stop the widget.
+            _trayIcon = null;
+        }
+    }
+
+    private void OnTrayMenuRequested(int screenX, int screenY)
+    {
+        if (_overlay is { } overlay)
+        {
+            overlay.ShowContextMenuAt(
+                _trayIcon?.Handle ?? 0, screenX, screenY);
+            return;
+        }
+
+        // Without an overlay there is no widget state to build the menu from,
+        // but the tray must still be able to exit or start with Windows.
+        using var menu = new Interop.NativeMenu();
+        menu.AddItem("Start with Windows", 1, _startWithWindows);
+        menu.AddItem("Exit Taskbar Music Widget", 2);
+        var command = Interop.NativeMenu.Show(
+            menu.Handle, _trayIcon?.Handle ?? 0, screenX, screenY);
+        if (command == 1)
+        {
+            _startWithWindows = !_startWithWindows;
+            AutostartStore.Set(_startWithWindows);
+            SaveSettings();
+        }
+        else if (command == 2)
+        {
+            Shutdown();
+        }
+    }
+
+    private void OnPlayersChanged()
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted)
+            return;
+
+        _ = dispatcher.BeginInvoke(() =>
+        {
+            _overlay?.SetPlayerOptions(
+                _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
+        });
+    }
+
+    private void OnPlayerSelectedChanged(object? sender, string? playerId)
+    {
+        _playerId = playerId ?? "";
+        _mediaSessionService.SelectPlayer(_playerId);
+        SaveSettings();
+        if (_overlay is { } overlay)
+            overlay.SetPlayerOptions(
+                _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
+    }
+
+    private void OnHideWhenIdleChanged(object? sender, bool enabled)
+    {
+        _hideWhenIdle = enabled;
+        SaveSettings();
+    }
+
     private void OnStartupChanged(object? sender, bool enabled)
     {
         _startWithWindows = enabled;
@@ -562,6 +660,28 @@ internal sealed class TaskbarMusicWidgetService
 
     private void UpdateTimers(MediaSessionState state)
     {
+        // Nothing is playing anywhere: the poll and the sync timers have nothing
+        // to do, so they stop until a player has a session again. Media events
+        // bring the widget back, and a layout refresh catches up on any taskbar
+        // change that happened while it was idle.
+        if (!_mediaSessionService.HasSession)
+        {
+            if (_layoutTimer.IsEnabled)
+            {
+                _layoutTimer.Stop();
+                _lyricsTimer.Stop();
+                _timelineSyncTimer.Stop();
+            }
+
+            return;
+        }
+
+        if (!_layoutTimer.IsEnabled)
+        {
+            _layoutTimer.Start();
+            _ = RefreshTaskbarLayoutAsync();
+        }
+
         var shouldRun = _lyricsMode && _lyrics?.IsTimed == true && state.IsPlaying;
         if (shouldRun)
         {
@@ -926,6 +1046,13 @@ internal sealed class TaskbarMusicWidgetService
     /// </summary>
     private static bool RectsNearEqual(Rect left, Rect right)
     {
+        // Rect.Empty is made of infinities, so |inf - inf| is NaN and every
+        // comparison with NaN is false: two empty rects - no left block, for
+        // instance - compared as "not near" and made every poll reposition the
+        // widget, which repaints it.
+        if (left.IsEmpty || right.IsEmpty)
+            return left.IsEmpty && right.IsEmpty;
+
         const double tolerance = 24;
         return Math.Abs(left.X - right.X) <= tolerance &&
                Math.Abs(left.Y - right.Y) <= tolerance &&
@@ -1052,6 +1179,8 @@ internal sealed class TaskbarMusicWidgetService
 
     private void Shutdown()
     {
+        _trayIcon?.Dispose();
+        _trayIcon = null;
         _layoutTimer.Stop();
         _layoutChangeTimer.Stop();
         _nativeHandleTimer.Stop();
