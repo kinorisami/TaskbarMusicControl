@@ -17,7 +17,6 @@ internal sealed class NativeMenu : IDisposable
 
     private const uint TpmLeftAlign = 0x0000;
     private const uint TpmTopAlign = 0x0000;
-    private const uint TpmRightButton = 0x0002;
     private const uint TpmReturnCmd = 0x0100;
 
     private const uint WmNull = 0x0000;
@@ -58,9 +57,11 @@ internal sealed class NativeMenu : IDisposable
         // The menu has to be dismissed when the user clicks elsewhere, and that
         // only happens reliably while the owner is the foreground window.
         SetForegroundWindow(owner);
+        // TPM_RIGHTBUTTON would let the right button pick an item too; a menu
+        // should only react to the left button.
         var command = TrackPopupMenuEx(
             menu,
-            TpmLeftAlign | TpmTopAlign | TpmRightButton | TpmReturnCmd,
+            TpmLeftAlign | TpmTopAlign | TpmReturnCmd,
             screenX,
             screenY,
             owner,

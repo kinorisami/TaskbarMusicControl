@@ -137,6 +137,7 @@ public partial class MusicOverlayWindow : Window
     private bool _hideWhenIdle;
     private int _pauseHideSeconds;
     private bool _manualHidden;
+    private nint _menuOwner;
     private bool _hidden;
     private string _hiddenReason = "";
     private IReadOnlyList<MediaPlayerOption> _players = Array.Empty<MediaPlayerOption>();
@@ -893,6 +894,16 @@ public partial class MusicOverlayWindow : Window
     internal void SetManualHidden(bool hidden) => _manualHidden = hidden;
 
     /// <summary>
+    /// The window the context menu belongs to. It has to be a top-level window of
+    /// this process: TrackPopupMenuEx refuses to run its modal loop while the
+    /// owner is not the foreground window, and SetForegroundWindow never succeeds
+    /// for the widget itself - it is a WS_EX_NOACTIVATE child of the taskbar. The
+    /// tray icon's hidden window is used instead. This does not close the Start
+    /// menu: it only makes the menu appear where and when it is asked for.
+    /// </summary>
+    internal void SetMenuOwner(nint owner) => _menuOwner = owner;
+
+    /// <summary>
     /// The service owns why the widget is hidden - by hand, no media, paused for
     /// a while - and hands the answer down with a word for the menu. The window
     /// only turns transparent: it is a child of the taskbar and stays attached, so
@@ -1214,7 +1225,10 @@ public partial class MusicOverlayWindow : Window
         // The menu must be owned by a window of this thread: TrackPopupMenuEx
         // posts its messages to the owner, and an owner in another process never
         // receives them, which cancels the menu immediately.
-        var owner = ownerOverride ?? (_nativeHandle != 0 ? _nativeHandle : _taskbarHandle);
+        var owner = ownerOverride
+            ?? (_menuOwner != 0
+                ? _menuOwner
+                : _nativeHandle != 0 ? _nativeHandle : _taskbarHandle);
         _menuOpen = true;
         try
         {

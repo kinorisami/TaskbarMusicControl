@@ -246,6 +246,7 @@ internal sealed class TaskbarMusicWidgetService
         overlay.SetPauseHideSeconds(_pauseHideSeconds);
         overlay.SetPlayerOptions(
             _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
+        overlay.SetMenuOwner(_trayIcon?.Handle ?? 0);
         overlay.SetBlock(_block);
         overlay.SetAlignment(_alignment);
         overlay.UpdateMedia(state.Title, state.Artist, state.ArtworkBytes);
@@ -862,7 +863,13 @@ internal sealed class TaskbarMusicWidgetService
         => ScheduleLayoutRefresh();
 
     private void OnTaskbarCreated(object? sender, EventArgs e)
-        => ScheduleLayoutRefresh();
+    {
+        // A recreated taskbar means Explorer restarted, and the tray icon went
+        // with the old one. The broadcast usually gets there first; this is the
+        // other half of the pair, so either one is enough.
+        _trayIcon?.ReAdd();
+        ScheduleLayoutRefresh();
+    }
 
     private void ScheduleLayoutRefresh()
     {

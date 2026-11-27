@@ -119,6 +119,7 @@ internal sealed class TrayIcon : IDisposable
     }
 
     private bool _added;
+    private int _addAttempts;
     private string _tooltip = Tooltip;
 
     /// <summary>
@@ -140,6 +141,18 @@ internal sealed class TrayIcon : IDisposable
         Shell_NotifyIcon(NimModify, ref data);
     }
 
+    /// <summary>
+    /// Adds the icon again after Explorer dropped it. Called from the
+    /// TaskbarCreated broadcast and from the taskbar watcher, whichever notices
+    /// the restart first.
+    /// </summary>
+    public void ReAdd()
+    {
+        _added = false;
+        _addAttempts = 0;
+        AddIcon();
+    }
+
     private void AddIcon()
     {
         if (_disposed || _added || Handle == 0)
@@ -149,6 +162,24 @@ internal sealed class TrayIcon : IDisposable
         data.uFlags = NifMessage | NifIcon | NifTip;
         _added = Shell_NotifyIcon(NimAdd, ref data);
         TaskbarLayoutDiagnostics.Write($"tray icon added={_added}");
+        if (_added)
+        {
+            _addAttempts = 0;
+            return;
+        }
+
+        // Explorer may still be building its notification area when it announces
+        // the restart; keep trying for a few seconds.
+        if (++_addAttempts > 5)
+            return;
+
+        var dispatcher = _source?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted)
+            return;
+
+        _ = Task.Delay(TimeSpan.FromSeconds(1)).ContinueWith(
+            _ => dispatcher.BeginInvoke(new Action(AddIcon)),
+            TaskScheduler.Default);
     }
 
     private void RemoveIcon()
