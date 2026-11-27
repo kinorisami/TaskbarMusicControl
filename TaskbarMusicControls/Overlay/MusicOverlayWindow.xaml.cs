@@ -356,6 +356,8 @@ public partial class MusicOverlayWindow : Window
         if (width < MinimumWidth)
             return TaskbarPositionResult.NoSpace;
 
+        TaskbarLayoutDiagnostics.Write(
+            $"place: width={width:F1} (current {Width:F1}) layoutMode={_responsiveLayoutWidth:F1}");
         if (Math.Abs(Width - width) > 0.5)
             Width = width;
         if (Math.Abs(_responsiveLayoutWidth - width) > 0.5)
@@ -376,6 +378,13 @@ public partial class MusicOverlayWindow : Window
             if (!AttachToTaskbar(handle, taskbarHandle))
                 return TaskbarPositionResult.NotAttached;
 
+            // The available area can change without moving the widget - its right
+            // edge is what matters, and that stayed the same when the task list
+            // grew on the other side. Repositioning anyway repaints the whole
+            // layered window, which shows up as a flash.
+            if (!NeedsReposition(handle, physicalLeft, physicalTop, physicalWidth, physicalHeight))
+                return TaskbarPositionResult.Positioned;
+
             var rect = new NativeRect(
                 (int)Math.Round(physicalLeft),
                 (int)Math.Round(physicalTop),
@@ -393,6 +402,23 @@ public partial class MusicOverlayWindow : Window
         }
 
         return TaskbarPositionResult.Positioned;
+    }
+
+    /// <summary>
+    /// Compares the target rectangle with the one the window already has. The
+    /// widget is anchored to the right edge of the available area, so a lot of
+    /// "layout changed" events do not move it at all.
+    /// </summary>
+    private static bool NeedsReposition(
+        nint handle, double left, double top, double width, double height)
+    {
+        if (!GetWindowRect(handle, out var current))
+            return true;
+
+        return current.Left != (int)Math.Round(left) ||
+               current.Top != (int)Math.Round(top) ||
+               current.Right != (int)Math.Round(left + width) ||
+               current.Bottom != (int)Math.Round(top + height);
     }
 
     private void ApplyResponsiveLayout(double width)
@@ -715,6 +741,7 @@ public partial class MusicOverlayWindow : Window
         if (!_hoverControlsMode || _drawerOpen == open)
             return;
 
+        TaskbarLayoutDiagnostics.Write($"drawer {(open ? "open" : "close")}");
         _drawerOpen = open;
         if (open)
         {
@@ -788,16 +815,45 @@ public partial class MusicOverlayWindow : Window
         SetDrawerOpen(false);
     }
 
+    /// <summary>
+    /// How far the width has to move past a threshold before the layout switches.
+    /// The shell animates the task list right at those thresholds, and without
+    /// the margin the widget flips between layouts several times in a row.
+    /// </summary>
+    private const double ModeHysteresis = 16;
+
     private WidgetDisplayMode GetEffectiveMode(double availableWidth)
     {
         var mode = _displayMode;
+        var current = _responsiveLayoutWidth >= 0
+            ? ModeAtWidth(_responsiveLayoutWidth, mode)
+            : mode;
+
+        var coverOnlyCeiling = current == WidgetDisplayMode.CoverOnly
+            ? TransportLayoutWidth + ModeHysteresis
+            : TransportLayoutWidth;
+        var fullCeiling =
+            current is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls
+                ? DefaultWidth - ModeHysteresis
+                : DefaultWidth + ModeHysteresis;
+
         // If the available width cannot fit the full layout at its natural size,
         // drop straight to cover-and-controls instead of squeezing the full layout.
         if ((mode is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls) &&
-            availableWidth < DefaultWidth)
+            availableWidth < fullCeiling)
             mode = WidgetDisplayMode.CoverAndControls;
-        if (availableWidth < TransportLayoutWidth)
+        if (availableWidth < coverOnlyCeiling)
             mode = WidgetDisplayMode.CoverOnly;
+        return mode;
+    }
+
+    private static WidgetDisplayMode ModeAtWidth(double width, WidgetDisplayMode mode)
+    {
+        if (width < TransportLayoutWidth)
+            return WidgetDisplayMode.CoverOnly;
+        if (mode is WidgetDisplayMode.FullDetails or WidgetDisplayMode.LyricsWithHoverControls &&
+            width < DefaultWidth)
+            return WidgetDisplayMode.CoverAndControls;
         return mode;
     }
 
@@ -1439,6 +1495,10 @@ public partial class MusicOverlayWindow : Window
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern nint SetParent(nint child, nint newParent);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(nint hwnd, out NativeRect rect);
 
     [DllImport("user32.dll")]
     private static extern nint GetParent(nint hwnd);

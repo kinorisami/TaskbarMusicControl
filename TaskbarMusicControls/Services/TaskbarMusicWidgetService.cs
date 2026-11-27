@@ -30,6 +30,12 @@ internal sealed class TaskbarMusicWidgetService
     {
         Interval = TimeSpan.FromMilliseconds(150)
     };
+    private readonly DispatcherTimer _settleRefreshTimer = new()
+    {
+        Interval = TimeSpan.FromMilliseconds(400)
+    };
+    private int _settleRefreshesLeft;
+    private Rect _settleLastAvailable;
     private readonly DispatcherTimer _nativeHandleTimer = new()
     {
         Interval = TimeSpan.FromSeconds(2)
@@ -72,6 +78,7 @@ internal sealed class TaskbarMusicWidgetService
     {
         _layoutTimer.Tick += OnLayoutTimerTick;
         _layoutChangeTimer.Tick += OnLayoutChangeTimerTick;
+        _settleRefreshTimer.Tick += OnSettleRefreshTimerTick;
         _nativeHandleTimer.Tick += OnNativeHandleTimerTick;
         _taskbarRecoveryTimer.Tick += OnTaskbarRecoveryTimerTick;
         _lyricsTimer.Tick += OnLyricsTimerTick;
@@ -526,6 +533,51 @@ internal sealed class TaskbarMusicWidgetService
         // the one place a layout refresh gets recorded.
         TaskbarLayoutDiagnostics.Write("layout change settled: refreshing");
         _ = RefreshTaskbarLayoutAsync();
+        ScheduleSettleRefreshes();
+    }
+
+    /// <summary>
+    /// The shell commits the new taskbar layout slightly after the change is
+    /// reported, so the first refresh can still measure the old one - closing an
+    /// application leaves the widget narrow until something refreshes again.
+    /// A few follow-ups catch the settled layout without waiting for the poll.
+    /// </summary>
+    private void ScheduleSettleRefreshes()
+    {
+        _settleRefreshesLeft = 3;
+        // Compared against what is on screen now, so the first follow-up that
+        // finds the same layout as the one before it can stop the rest.
+        _settleLastAvailable = _positionedAvailableBounds;
+        _settleRefreshTimer.Stop();
+        _settleRefreshTimer.Start();
+    }
+
+    private void OnSettleRefreshTimerTick(object? sender, EventArgs e)
+    {
+        if (--_settleRefreshesLeft <= 0)
+            _settleRefreshTimer.Stop();
+
+        _ = RefreshTaskbarLayoutAsync();
+    }
+
+    /// <summary>
+    /// Stops the follow-up refreshes as soon as two detections in a row agree:
+    /// the layout has settled and further scans would only cost CPU. Each scan is
+    /// a UI Automation walk of the taskbar, so they are not free.
+    /// </summary>
+    private void NoteDetectedLayout(Rect availableBounds)
+    {
+        if (_settleRefreshesLeft <= 0)
+            return;
+
+        if (availableBounds == _settleLastAvailable)
+        {
+            _settleRefreshesLeft = 0;
+            _settleRefreshTimer.Stop();
+            return;
+        }
+
+        _settleLastAvailable = availableBounds;
     }
 
     private void OnNativeHandleTimerTick(object? sender, EventArgs e)
@@ -593,6 +645,11 @@ internal sealed class TaskbarMusicWidgetService
                     entry.Taskbar.DisplayName,
                     entry.Taskbar.IsPrimary)).ToArray();
                 _overlay?.SetTaskbarOptions(_taskbarOptions, _selectedTaskbarDeviceId);
+                TaskbarLayoutDiagnostics.Write(
+                    $"layout detected: available=" +
+                    string.Join(";", layouts.Select(entry => entry.Layout.AvailableBounds)));
+                if (layouts.Length > 0)
+                    NoteDetectedLayout(OrderForSelection(layouts)[0].Layout.AvailableBounds);
                 var foundLayout = false;
 
                 foreach (var entry in OrderForSelection(layouts))
@@ -779,9 +836,15 @@ internal sealed class TaskbarMusicWidgetService
         return false;
     }
 
+    /// <summary>
+    /// Compared with a tolerance rather than exactly: the shell animates the task
+    /// list, so the available area arrives in small steps. Repositioning for each
+    /// step repaints the widget several times in a row; the steps are ignored and
+    /// the settled layout is the one that gets applied.
+    /// </summary>
     private static bool RectsNearEqual(Rect left, Rect right)
     {
-        const double tolerance = 10;
+        const double tolerance = 24;
         return Math.Abs(left.X - right.X) <= tolerance &&
                Math.Abs(left.Y - right.Y) <= tolerance &&
                Math.Abs(left.Width - right.Width) <= tolerance &&
