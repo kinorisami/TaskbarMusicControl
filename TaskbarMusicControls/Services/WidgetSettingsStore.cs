@@ -14,6 +14,8 @@ internal sealed record WidgetSettings(
     bool ShowTranslation,
     bool StartWithWindows,
     bool HideWhenIdle,
+    bool ManualHidden,
+    int PauseHideSeconds,
     string PlayerId,
     WidgetBlock Block,
     WidgetAlignment Alignment,
@@ -22,7 +24,8 @@ internal sealed record WidgetSettings(
     public static WidgetSettings Default { get; } = new(
         WidgetDisplayMode.Full, "", LyricsSourceSettings.Default,
         LyricsMode: false, ShowTranslation: true, StartWithWindows: false,
-        HideWhenIdle: false, PlayerId: "", Block: WidgetBlock.Right, Alignment: WidgetAlignment.Right,
+        HideWhenIdle: false, ManualHidden: false, PauseHideSeconds: 0,
+        PlayerId: "", Block: WidgetBlock.Right, Alignment: WidgetAlignment.Right,
         TaskbarCentered: false);
 }
 
@@ -78,6 +81,8 @@ internal static class WidgetSettingsStore
                 entry.ShowTranslation is null ||
                 entry.StartWithWindows is null ||
                 entry.HideWhenIdle is null ||
+                entry.ManualHidden is null ||
+                entry.PauseHideSeconds is null ||
                 entry.PlayerId is null ||
                 entry.Block is null ||
                 entry.Alignment is null ||
@@ -93,6 +98,8 @@ internal static class WidgetSettingsStore
                 entry.ShowTranslation ?? true,
                 entry.StartWithWindows ?? false,
                 entry.HideWhenIdle ?? false,
+                entry.ManualHidden ?? false,
+                entry.PauseHideSeconds ?? 0,
                 entry.PlayerId ?? "",
                 entry.Block is { } block && Enum.IsDefined(block)
                     ? block
@@ -139,6 +146,8 @@ internal static class WidgetSettingsStore
                         ShowTranslation = settings.ShowTranslation,
                         StartWithWindows = settings.StartWithWindows,
                         HideWhenIdle = settings.HideWhenIdle,
+                        ManualHidden = settings.ManualHidden,
+                        PauseHideSeconds = settings.PauseHideSeconds,
                         PlayerId = settings.PlayerId,
                         Block = settings.Block,
                         Alignment = settings.Alignment,
@@ -175,6 +184,8 @@ internal static class WidgetSettingsStore
         public bool? ShowTranslation { get; set; }
         public bool? StartWithWindows { get; set; }
         public bool? HideWhenIdle { get; set; }
+        public bool? ManualHidden { get; set; }
+        public int? PauseHideSeconds { get; set; }
         public string? PlayerId { get; set; }
         public WidgetBlock? Block { get; set; }
         public WidgetAlignment? Alignment { get; set; }

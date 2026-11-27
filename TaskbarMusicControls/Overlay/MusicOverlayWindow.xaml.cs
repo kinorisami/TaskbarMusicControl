@@ -135,11 +135,14 @@ public partial class MusicOverlayWindow : Window
     private bool _lyricsLocked;
     private bool _startWithWindows;
     private bool _hideWhenIdle;
+    private int _pauseHideSeconds;
+    private bool _manualHidden;
+    private bool _hidden;
+    private string _hiddenReason = "";
     private IReadOnlyList<MediaPlayerOption> _players = Array.Empty<MediaPlayerOption>();
     private string? _activePlayerId;
     private string _pinnedPlayerId = "";
-    private bool _idle;
-    private bool _idleHidden;
+
     private bool _lightTheme = true;
     private bool _themeRefreshQueued;
     private WidgetBlock _block = WidgetBlock.Right;
@@ -171,6 +174,8 @@ public partial class MusicOverlayWindow : Window
     internal event Action<object?, bool>? TranslationChanged;
     internal event Action<object?, bool>? StartupChanged;
     internal event Action<object?, bool>? HideWhenIdleChanged;
+    internal event Action<object?, bool>? ManualHiddenChanged;
+    internal event Action<object?, int>? PauseHideChanged;
     internal event Action<object?, string?>? PlayerSelectedChanged;
 
     /// <summary>
@@ -881,31 +886,25 @@ public partial class MusicOverlayWindow : Window
 
     internal void SetStartWithWindows(bool enabled) => _startWithWindows = enabled;
 
-    internal void SetHideWhenIdle(bool enabled)
-    {
-        _hideWhenIdle = enabled;
-        ApplyIdleVisibility();
-    }
+    internal void SetHideWhenIdle(bool enabled) => _hideWhenIdle = enabled;
+
+    internal void SetPauseHideSeconds(int seconds) => _pauseHideSeconds = seconds;
+
+    internal void SetManualHidden(bool hidden) => _manualHidden = hidden;
 
     /// <summary>
-    /// Tells the widget whether any player has a session at all. With the option
-    /// on, a widget without media is made fully transparent rather than closed:
-    /// the window is a child of the taskbar and stays attached, so it only has to
-    /// be revealed again when playback starts.
+    /// The service owns why the widget is hidden - by hand, no media, paused for
+    /// a while - and hands the answer down with a word for the menu. The window
+    /// only turns transparent: it is a child of the taskbar and stays attached, so
+    /// it has to be revealed rather than recreated.
     /// </summary>
-    internal void SetIdle(bool idle)
+    internal void SetHidden(bool hidden, string reason)
     {
-        _idle = idle;
-        ApplyIdleVisibility();
-    }
-
-    private void ApplyIdleVisibility()
-    {
-        var hidden = _hideWhenIdle && _idle;
-        if (_idleHidden == hidden)
+        _hiddenReason = reason;
+        if (_hidden == hidden)
             return;
 
-        _idleHidden = hidden;
+        _hidden = hidden;
         Opacity = hidden ? 0 : 1;
         IsHitTestVisible = !hidden;
         if (hidden)
@@ -1064,6 +1063,8 @@ public partial class MusicOverlayWindow : Window
     private const int CmdTaskbarBase = 400;
     private const int CmdStartWithWindows = 500;
     private const int CmdHideWhenIdle = 502;
+    private const int CmdManualHide = 503;
+    private const int CmdPauseHideBase = 520;
     private const int CmdPlayerFollow = 700;
     private const int CmdPlayerBase = 701;
     private const int CmdExit = 501;
@@ -1197,9 +1198,17 @@ public partial class MusicOverlayWindow : Window
         alignment.AddItem("Left", CmdAlignLeft, _alignment == WidgetAlignment.Left);
         alignment.AddItem("Right", CmdAlignRight, _alignment == WidgetAlignment.Right);
 
+        var visibility = menu.AddSubmenu("Visibility");
+        if (_hidden)
+            visibility.AddItem($"Hidden: {_hiddenReason}", 0, isEnabled: false);
+        visibility.AddItem("Hide the widget", CmdManualHide, _manualHidden);
+        visibility.AddItem("Hide when nothing is playing", CmdHideWhenIdle, _hideWhenIdle);
+        var paused = visibility.AddSubmenu("Hide when paused");
+        for (var i = 0; i < PauseHideSeconds.Length; i++)
+            AddPauseHideOption(paused, PauseHideTexts[i], i);
+
         menu.AddSeparator();
         menu.AddItem("Start with Windows", CmdStartWithWindows, _startWithWindows);
-        menu.AddItem("Hide when nothing is playing", CmdHideWhenIdle, _hideWhenIdle);
         menu.AddItem("Exit Taskbar Music Widget", CmdExit);
 
         // The menu must be owned by a window of this thread: TrackPopupMenuEx
@@ -1229,6 +1238,14 @@ public partial class MusicOverlayWindow : Window
                 SetDrawerOpen(false);
         }
     }
+
+    /// <summary>The pause timeouts the menu offers; index 0 is off.</summary>
+    private static readonly int[] PauseHideSeconds = [0, 15, 30, 60, 300];
+    private static readonly string[] PauseHideTexts =
+        ["Off", "15 seconds", "30 seconds", "1 minute", "5 minutes"];
+
+    private void AddPauseHideOption(NativeMenu menu, string text, int index) =>
+        menu.AddItem(text, CmdPauseHideBase + index, _pauseHideSeconds == PauseHideSeconds[index]);
 
     private void AddDisplayMode(NativeMenu menu, string text, WidgetDisplayMode mode) =>
         menu.AddItem(text, CmdDisplayModeBase + (int)mode, _displayMode == mode);
@@ -1316,8 +1333,15 @@ public partial class MusicOverlayWindow : Window
                 break;
             case CmdHideWhenIdle:
                 _hideWhenIdle = !_hideWhenIdle;
-                ApplyIdleVisibility();
                 HideWhenIdleChanged?.Invoke(this, _hideWhenIdle);
+                break;
+            case CmdManualHide:
+                _manualHidden = !_manualHidden;
+                ManualHiddenChanged?.Invoke(this, _manualHidden);
+                break;
+            case >= CmdPauseHideBase and < CmdPauseHideBase + 10:
+                _pauseHideSeconds = PauseHideSeconds[command - CmdPauseHideBase];
+                PauseHideChanged?.Invoke(this, _pauseHideSeconds);
                 break;
             case CmdExit:
                 ExitWidget();

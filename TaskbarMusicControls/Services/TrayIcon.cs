@@ -23,6 +23,7 @@ internal sealed class TrayIcon : IDisposable
     private const int WmRButtonUp = 0x0205;
     private const int WmContextMenu = 0x007B;
     private const uint NimAdd = 0;
+    private const uint NimModify = 1;
     private const uint NimDelete = 2;
     private const uint NifMessage = 0x01;
     private const uint NifIcon = 0x02;
@@ -36,8 +37,15 @@ internal sealed class TrayIcon : IDisposable
     private nint _icon;
     private bool _disposed;
 
-    /// <summary>Raised for a click on the icon, with the pointer's screen position.</summary>
+    /// <summary>Raised by a right click, with the pointer's screen position.</summary>
     public event Action<int, int>? MenuRequested;
+
+    /// <summary>
+    /// Raised by a left click. It toggles the widget instead of opening the
+    /// menu: that is the control a tray icon normally offers, and it is the way
+    /// back to a widget the user hid by hand.
+    /// </summary>
+    public event Action? ToggleRequested;
 
     /// <summary>The message window; the menu uses it as its owner.</summary>
     public nint Handle { get; }
@@ -85,7 +93,12 @@ internal sealed class TrayIcon : IDisposable
         {
             // lParam carries the mouse message that happened on the icon.
             var mouseMessage = (int)(lParam.ToInt64() & 0xFFFF);
-            if (mouseMessage is WmLButtonUp or WmRButtonUp or WmContextMenu)
+            if (mouseMessage == WmLButtonUp)
+            {
+                handled = true;
+                ToggleRequested?.Invoke();
+            }
+            else if (mouseMessage is WmRButtonUp or WmContextMenu)
             {
                 handled = true;
                 if (GetCursorPos(out var cursor))
@@ -106,6 +119,26 @@ internal sealed class TrayIcon : IDisposable
     }
 
     private bool _added;
+    private string _tooltip = Tooltip;
+
+    /// <summary>
+    /// The tooltip states why the widget is not on screen, which the widget
+    /// itself cannot show while it is hidden.
+    /// </summary>
+    public void SetTooltip(string text)
+    {
+        if (string.Equals(_tooltip, text, StringComparison.Ordinal))
+            return;
+
+        _tooltip = text;
+        if (!_added)
+            return;
+
+        var data = CreateData();
+        data.uFlags = NifTip;
+        data.szTip = text;
+        Shell_NotifyIcon(NimModify, ref data);
+    }
 
     private void AddIcon()
     {
@@ -135,7 +168,7 @@ internal sealed class TrayIcon : IDisposable
         uID = TrayIconId,
         uCallbackMessage = WmTrayIcon,
         hIcon = _icon,
-        szTip = Tooltip,
+        szTip = _tooltip,
         szInfo = "",
         szInfoTitle = ""
     };

@@ -30,6 +30,8 @@ internal sealed class TaskbarMusicWidgetService
     {
         Interval = TimeSpan.FromMilliseconds(150)
     };
+    private readonly DispatcherTimer _pauseHideTimer = new();
+
     private readonly DispatcherTimer _settleRefreshTimer = new()
     {
         Interval = TimeSpan.FromMilliseconds(400)
@@ -58,6 +60,11 @@ internal sealed class TaskbarMusicWidgetService
     private bool _showTranslation = true;
     private bool _startWithWindows;
     private bool _hideWhenIdle;
+    private bool _manualHidden;
+    private int _pauseHideSeconds;
+    private bool _pausedHidden;
+    private bool _showForced;
+    private bool _widgetHidden;
     private string _playerId = "";
     private bool _exitRequested;
     private TrayIcon? _trayIcon;
@@ -88,6 +95,7 @@ internal sealed class TaskbarMusicWidgetService
         _layoutTimer.Tick += OnLayoutTimerTick;
         _layoutChangeTimer.Tick += OnLayoutChangeTimerTick;
         _settleRefreshTimer.Tick += OnSettleRefreshTimerTick;
+        _pauseHideTimer.Tick += OnPauseHideTimerTick;
         _nativeHandleTimer.Tick += OnNativeHandleTimerTick;
         _taskbarRecoveryTimer.Tick += OnTaskbarRecoveryTimerTick;
         _lyricsTimer.Tick += OnLyricsTimerTick;
@@ -108,6 +116,8 @@ internal sealed class TaskbarMusicWidgetService
         _showTranslation = settings.ShowTranslation;
         _startWithWindows = settings.StartWithWindows;
         _hideWhenIdle = settings.HideWhenIdle;
+        _manualHidden = settings.ManualHidden;
+        _pauseHideSeconds = settings.PauseHideSeconds;
         _playerId = settings.PlayerId;
         _block = settings.Block;
         _alignment = settings.Alignment;
@@ -196,6 +206,8 @@ internal sealed class TaskbarMusicWidgetService
         overlay.TranslationChanged += OnTranslationChanged;
         overlay.StartupChanged += OnStartupChanged;
         overlay.HideWhenIdleChanged += OnHideWhenIdleChanged;
+        overlay.ManualHiddenChanged += OnManualHiddenChanged;
+        overlay.PauseHideChanged += OnPauseHideChanged;
         overlay.PlayerSelectedChanged += OnPlayerSelectedChanged;
         overlay.DisplayModeChanged += OnDisplayModeChanged;
         overlay.TaskbarSelectionChanged += OnTaskbarSelectionChanged;
@@ -208,6 +220,8 @@ internal sealed class TaskbarMusicWidgetService
         overlay.SetShowTranslation(_showTranslation);
         overlay.SetStartWithWindows(_startWithWindows);
         overlay.SetHideWhenIdle(_hideWhenIdle);
+        overlay.SetManualHidden(_manualHidden);
+        overlay.SetPauseHideSeconds(_pauseHideSeconds);
         overlay.SetPlayerOptions(
             _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
         overlay.SetBlock(_block);
@@ -241,7 +255,8 @@ internal sealed class TaskbarMusicWidgetService
     /// <summary>Writes every setting, so the file always holds the full state.</summary>
     private void SaveSettings() => WidgetSettingsStore.Save(new WidgetSettings(
         _displayMode, _selectedTaskbarDeviceId, _lyricsSourceSettings,
-        _lyricsMode, _showTranslation, _startWithWindows, _hideWhenIdle, _playerId,
+        _lyricsMode, _showTranslation, _startWithWindows, _hideWhenIdle,
+        _manualHidden, _pauseHideSeconds, _playerId,
         _block, _alignment,
         _taskbarCentered));
 
@@ -375,7 +390,8 @@ internal sealed class TaskbarMusicWidgetService
 
     private void ApplyMediaState(MusicOverlayWindow overlay, MediaSessionState state)
     {
-        overlay.SetIdle(!_mediaSessionService.HasSession);
+        UpdatePauseHide(state);
+        UpdateVisibility();
         overlay.SetPlayerOptions(
             _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
 
@@ -535,6 +551,7 @@ internal sealed class TaskbarMusicWidgetService
         {
             _trayIcon = new TrayIcon();
             _trayIcon.MenuRequested += OnTrayMenuRequested;
+            _trayIcon.ToggleRequested += OnTrayToggleRequested;
         }
         catch (Exception)
         {
@@ -594,10 +611,109 @@ internal sealed class TaskbarMusicWidgetService
                 _mediaSessionService.Players, _mediaSessionService.ActivePlayerId, _playerId);
     }
 
+    private void OnManualHiddenChanged(object? sender, bool hidden)
+    {
+        _manualHidden = hidden;
+        _showForced = false;
+        SaveSettings();
+        UpdateVisibility();
+    }
+
+    private void OnPauseHideChanged(object? sender, int seconds)
+    {
+        _pauseHideSeconds = seconds;
+        SaveSettings();
+        UpdatePauseHide(_latestMediaState);
+        UpdateVisibility();
+    }
+
+    /// <summary>
+    /// Starts the countdown that hides the widget after a pause. It is only
+    /// started once, so the timeline events a paused player keeps sending do not
+    /// restart it.
+    /// </summary>
+    private void UpdatePauseHide(MediaSessionState state)
+    {
+        if (state.IsPlaying)
+            _showForced = false;
+
+        var paused = _mediaSessionService.HasSession && !state.IsPlaying;
+        if (!paused || _pauseHideSeconds <= 0)
+        {
+            _pauseHideTimer.Stop();
+            _pausedHidden = false;
+            return;
+        }
+
+        if (_pauseHideTimer.IsEnabled || _pausedHidden)
+            return;
+
+        _pauseHideTimer.Interval = TimeSpan.FromSeconds(_pauseHideSeconds);
+        _pauseHideTimer.Start();
+    }
+
+    private void OnPauseHideTimerTick(object? sender, EventArgs e)
+    {
+        _pauseHideTimer.Stop();
+        if (!_mediaSessionService.HasSession ||
+            _mediaSessionService.CurrentState.IsPlaying)
+            return;
+
+        _pausedHidden = true;
+        UpdateVisibility();
+    }
+
+    /// <summary>
+    /// One place decides whether the widget is on screen. It is hidden by hand,
+    /// because no player has a session, or because playback has been paused for
+    /// longer than the chosen timeout; the reason goes to the tray tooltip, which
+    /// is the only part of the widget still visible then.
+    /// </summary>
+    private void UpdateVisibility()
+    {
+        string? reason = null;
+        if (_manualHidden)
+            reason = "by hand";
+        else if (!_showForced && _hideWhenIdle && !_mediaSessionService.HasSession)
+            reason = "no media";
+        else if (!_showForced && _pausedHidden)
+            reason = "paused";
+
+        _widgetHidden = reason is not null;
+        _overlay?.SetHidden(_widgetHidden, reason ?? "");
+        _trayIcon?.SetTooltip(reason is null
+            ? "Taskbar Music Widget"
+            : $"Taskbar Music Widget - {reason}");
+    }
+
+    /// <summary>
+    /// The tray icon's left click: hide the widget when it is on screen, bring it
+    /// back when it is not - including when it was hidden for no media, where an
+    /// explicit show wins until playback starts.
+    /// </summary>
+    private void OnTrayToggleRequested()
+    {
+        if (_widgetHidden)
+        {
+            _manualHidden = false;
+            _pausedHidden = false;
+            _showForced = true;
+        }
+        else
+        {
+            _manualHidden = true;
+        }
+
+        _overlay?.SetManualHidden(_manualHidden);
+        SaveSettings();
+        UpdateVisibility();
+    }
+
     private void OnHideWhenIdleChanged(object? sender, bool enabled)
     {
         _hideWhenIdle = enabled;
         SaveSettings();
+        UpdateVisibility();
     }
 
     private void OnStartupChanged(object? sender, bool enabled)
@@ -908,6 +1024,8 @@ internal sealed class TaskbarMusicWidgetService
                             TaskbarLayoutDiagnostics.Write(
                                 $"hide overlay: failed to position in available area ({position})");
                             ReportPositionFailure(position, taskbar);
+                            _trayIcon?.SetTooltip(
+                                "Taskbar Music Widget - no room on the taskbar");
                             _overlay.Hide();
                             break;
                         }
@@ -1187,6 +1305,7 @@ internal sealed class TaskbarMusicWidgetService
         _taskbarRecoveryTimer.Stop();
         _lyricsTimer.Stop();
         _timelineSyncTimer.Stop();
+        _pauseHideTimer.Stop();
         _lyricsLookupCancellation?.Cancel();
         _lyricsLookupCancellation?.Dispose();
         Application.Current.Shutdown();
