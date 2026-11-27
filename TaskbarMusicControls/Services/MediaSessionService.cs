@@ -57,7 +57,9 @@ internal sealed class MediaSessionService
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
             _manager.CurrentSessionChanged += OnCurrentSessionChanged;
             _manager.SessionsChanged += OnSessionsChanged;
-            await RefreshCurrentSessionAsync();
+            // Same reason as the event handlers: the first property reads and the
+            // thumbnail of the current session must not run on the UI thread.
+            await Task.Run(() => RefreshCurrentSessionAsync());
         }
         catch (Exception)
         {
@@ -85,12 +87,18 @@ internal sealed class MediaSessionService
         Task.Run(() => RunCommandAsync(session => session.TrySkipNextAsync()));
 
     /// <summary>
-    /// Brings the window of the player behind the current session to the front.
-    /// A Win32 player reports its executable as the session id, which is enough
-    /// to find its main window; for a packaged app there is no reliable way to
-    /// get there, so nothing happens.
+    /// Shows or hides the window of the player behind the current session. A
+    /// Win32 player reports its executable as the session id, which is enough to
+    /// find its main window; for a packaged app there is no reliable way to get
+    /// there, so nothing happens.
     /// </summary>
-    public void ActivatePlayerWindow()
+    /// <remarks>
+    /// The second click puts the window away again. Which click is which is
+    /// tracked by this process rather than by asking Windows for the foreground
+    /// window: the widget cannot be activated, so the foreground window is not a
+    /// reliable hint by the time the click arrives.
+    /// </remarks>
+    public void TogglePlayerWindow()
     {
         var sessionId = _session?.SourceAppUserModelId;
         if (string.IsNullOrWhiteSpace(sessionId) ||
@@ -100,20 +108,78 @@ internal sealed class MediaSessionService
         try
         {
             var processName = Path.GetFileNameWithoutExtension(sessionId);
-            var handle = Process.GetProcessesByName(processName)
-                .Select(process => process.MainWindowHandle)
-                .FirstOrDefault(candidate => candidate != 0);
+            var processes = Process.GetProcessesByName(processName);
+            if (processes.Length == 0)
+                return;
+
+            var processIds = processes.Select(process => (uint)process.Id).ToHashSet();
+
+            // Process.MainWindowHandle only reports a visible, unowned window, so
+            // it is 0 while the player sits in the tray. Enumerate the process's
+            // windows instead and prefer the visible one.
+            var handle = FindPlayerWindow(processIds, requireVisible: true);
+            if (handle == 0)
+                handle = FindPlayerWindow(processIds, requireVisible: false);
             if (handle == 0)
                 return;
 
-            if (NativeMethods.IsIconic(handle))
-                NativeMethods.ShowWindow(handle, NativeMethods.SwRestore);
+            // Clicking the cover a second time puts the window away again; a
+            // player that was closed by hand is simply shown on the next click.
+            if (handle == _shownPlayerWindow && NativeMethods.IsWindowVisible(handle))
+            {
+                NativeMethods.ShowWindow(handle, NativeMethods.SwHide);
+                _shownPlayerWindow = nint.Zero;
+                return;
+            }
+
+            NativeMethods.ShowWindow(handle,
+                NativeMethods.IsIconic(handle) ? NativeMethods.SwRestore : NativeMethods.SwShow);
             NativeMethods.SetForegroundWindow(handle);
+            _shownPlayerWindow = handle;
         }
         catch (Exception)
         {
             // A player that refuses to come forward is not worth an error.
         }
+    }
+
+    private nint _shownPlayerWindow;
+
+    /// <summary>
+    /// The player's main window: the largest titled top-level window of its
+    /// process. The largest one is used so a small hidden helper window cannot be
+    /// picked instead of the real player.
+    /// </summary>
+    private static nint FindPlayerWindow(HashSet<uint> processIds, bool requireVisible)
+    {
+        var result = nint.Zero;
+        long bestArea = 0;
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
+            if (!processIds.Contains(processId))
+                return true;
+
+            if (NativeMethods.GetWindow(hwnd, NativeMethods.GwOwner) != nint.Zero)
+                return true;
+
+            if (NativeMethods.GetWindowTextLength(hwnd) == 0)
+                return true;
+
+            if (requireVisible && !NativeMethods.IsWindowVisible(hwnd))
+                return true;
+
+            if (!NativeMethods.GetWindowRect(hwnd, out var rect))
+                return true;
+
+            if (rect.Area <= bestArea)
+                return true;
+
+            bestArea = rect.Area;
+            result = hwnd;
+            return true;
+        }, nint.Zero);
+        return result;
     }
 
     public Task SeekAsync(TimeSpan position) => Task.Run(() => SeekCoreAsync(position));

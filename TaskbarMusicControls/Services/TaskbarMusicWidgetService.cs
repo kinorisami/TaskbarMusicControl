@@ -10,6 +10,7 @@ internal sealed class TaskbarMusicWidgetService
     private const int TaskbarSettleTicks = 4;
     private readonly TaskbarDetector _taskbarDetector = new();
     private readonly TaskbarLayoutDetector _layoutDetector = new();
+    private readonly TaskbarLayoutMonitor _layoutMonitor = new();
     private readonly TaskbarWindowMonitor _taskbarWindowMonitor = new();
     private readonly MediaSessionService _mediaSessionService = new();
     private readonly LyricsService _lyricsService = new();
@@ -75,6 +76,7 @@ internal sealed class TaskbarMusicWidgetService
         _taskbarRecoveryTimer.Tick += OnTaskbarRecoveryTimerTick;
         _lyricsTimer.Tick += OnLyricsTimerTick;
         _timelineSyncTimer.Tick += OnTimelineSyncTimerTick;
+        _layoutMonitor.LayoutChanged += OnTaskbarLayoutChanged;
         _taskbarWindowMonitor.LayoutChanged += OnTaskbarLayoutChanged;
         _taskbarWindowMonitor.TaskbarCreated += OnTaskbarCreated;
         _mediaSessionService.StateChanged += OnMediaSessionStateChanged;
@@ -124,6 +126,12 @@ internal sealed class TaskbarMusicWidgetService
         IntPtr taskbarHandle,
         TaskbarLayoutDetector.TaskbarLayout layout)
     {
+        // A layout refresh can run while StartAsync is still waiting for the
+        // media session or the first taskbar scan. Creating a second window here
+        // would leave an orphaned overlay behind the visible one.
+        if (_overlay is not null)
+            return true;
+
         var overlay = new MusicOverlayWindow();
         overlay.SetDisplayMode(_displayMode);
         overlay.SetTaskbarOptions(_taskbarOptions, _selectedTaskbarDeviceId);
@@ -148,7 +156,7 @@ internal sealed class TaskbarMusicWidgetService
         overlay.SeekRequested += (_, position) =>
             _ = _mediaSessionService.SeekAsync(position);
         overlay.PlayerActivateRequested += (_, _) =>
-            _mediaSessionService.ActivatePlayerWindow();
+            _mediaSessionService.TogglePlayerWindow();
         overlay.LyricsModeChanged += OnLyricsModeChanged;
         overlay.LyricsSourceSettingsChanged += OnLyricsSourceSettingsChanged;
         overlay.LyricsLockChanged += OnLyricsLockChanged;
@@ -514,6 +522,9 @@ internal sealed class TaskbarMusicWidgetService
     private void OnLayoutChangeTimerTick(object? sender, EventArgs e)
     {
         _layoutChangeTimer.Stop();
+        // Debounced: the WinEvent and UIA listeners fire in bursts, so this is
+        // the one place a layout refresh gets recorded.
+        TaskbarLayoutDiagnostics.Write("layout change settled: refreshing");
         _ = RefreshTaskbarLayoutAsync();
     }
 
@@ -854,9 +865,13 @@ internal sealed class TaskbarMusicWidgetService
 
     private void WatchTaskbar(IntPtr taskbarHandle)
     {
-        // The WinEvent hook in TaskbarWindowMonitor reports taskbar changes for
-        // every taskbar; only the handle is remembered here, to tell later
-        // whether the taskbar is still alive.
+        if (_watchedTaskbar == taskbarHandle)
+            return;
+
+        // The WinEvent hook in TaskbarWindowMonitor covers changes that own a
+        // window; the UIA listener covers the ones that do not, such as a
+        // taskbar button appearing or a tray icon moving into the hidden icons.
         _watchedTaskbar = taskbarHandle;
+        _layoutMonitor.Watch(taskbarHandle);
     }
 }
